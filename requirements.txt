@@ -1,0 +1,43 @@
+# Python 3.11 required
+# Create venv with: python3.11 -m venv .venv
+
+# PyTorch (CUDA 12.6)
+--index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
+torchaudio==2.7.0+cu128
+
+# Reset index for remaining packages
+--index-url https://pypi.org/simple
+
+# PyG base
+torch_geometric==2.7.0
+
+# PyG accelerators (must match torch + CUDA version exactly)
+# Installed separately via find-links - see setup instructions
+
+# Neural ODE (Gravina dependency)
+torchdyn==1.0.6
+
+# HuggingFace stack
+transformers>=4.51.0
+accelerate>=1.0.0
+tokenizers>=0.21.0
+huggingface_hub>=0.30.0
+
+# Gravina original dependencies
+dill>=0.3.4,<0.3.5
+matplotlib
+numpy
+seaborn
+tqdm
+pandas
+scikit-learn
+ogb
+openpyxl
+
+# Ray (hyperparameter tuning: pinned for Python 3.11 compat)
+"ray[tune]>=2.0.0"
+
+# Manim (for animations)
+manim
