@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
-from RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighbourhoodAggregation
+from .RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighborhoodAggregation
 
 class CADGNConv(nn.Module):
     """
@@ -37,5 +37,16 @@ class CADGNConv(nn.Module):
         self.gamma_adapt = nn.Parameter(torch.zeros(1))
 
         # Directed RoPE neighbourhood aggregation : replaces Phi in A-DGN
-        self.phi = RoPEDirectedNeighbourhoodAggregation(hidden_dim, hidden_dim, epsilon, base_gamma)
+        self.phi = RoPEDirectedNeighborhoodAggregation(hidden_dim)
+
+        activations = {
+            "tanh": torch.tanh,
+            "relu": F.relu,
+            "gelu": F.gelu,
+        }
+        assert act in activations, f"act must be one of {list(activations)}. Got {act}."
+        self.act = activations[act]
+
+        nn.init.kaiming_normal_(self.W, a=math.sqrt(5))
+
 
