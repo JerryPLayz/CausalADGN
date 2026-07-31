@@ -107,13 +107,3 @@ class CADGNConv(nn.Module):
                 f'num_iters={self.num_iters}, '
                 f'epsilon={self.epsilon}, '
                 f'base_gamma={self.base_gamma})')
-
-
-
-
-
-
-
-
-
-
