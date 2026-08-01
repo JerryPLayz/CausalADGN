@@ -140,7 +140,7 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
         :param layer:
         :return:
         """
-        ## TODO: implement self-loop contributions
+        ## TODO: implement self-loop contributions (might require graph changes to support)
 
         x_cause_rot = self.apply_rotation(x, layer, self.alpha_cause)
         psi_c = self.propagate(edge_index, x=x_cause_rot)
