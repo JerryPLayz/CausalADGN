@@ -358,7 +358,7 @@ def reconstruction_loss(
     :param token_ids: tensor of shape (num_nodes, seq_len) LongTensor; Ground truth, same token_ids fed to Encoder Head
     :param pad_id: Token ID for padding, these positions are ignored; from `family.tokenizer.pad_token_id`
     :param edge_logits: tensor of shape (num_candidates,); raw GraphBuilder scores
-    :param candidate_pairs: tensor of shape (2, num_candidates); from _generate_candidate_pairs()
+    :param candidate_pairs: tensor of shape (2, num_candidates); from `_generate_candidate_pairs()`
     :param true_edge_index: tensor of shape (2, num_true_edges); ground truth directed edges
     :param Z: tensor of shape (num_nodes, hidden_dim); gradient flows through this param
     :param H: tensor of shape (num_nodes, hidden_dim); norm reference, detached internally
@@ -373,7 +373,6 @@ def reconstruction_loss(
     :param reduction: the kind of reduction in which to produce the scalar - e.g. 'sum' or 'mean'
     :return: dict with keys: ['loss', 'L_nodes', 'L_edges', 'L_norm'], only 'loss' is gradient attached.
     """
-
     L_nodes = node_reconstruction_loss(
         token_logits=token_logits,
         token_ids=token_ids,
@@ -406,5 +405,8 @@ def reconstruction_loss(
         'L_edges': L_edges.detach(),
         'L_norm': L_norm.detach(),
     }
+
+
+# todo: rewrite node reconstruction loss now that we are using the token embeddings, not token ids....
 
 
