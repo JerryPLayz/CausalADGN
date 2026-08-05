@@ -264,34 +264,48 @@ def edge_reconstruction_loss(
 
 # # Node Reconstruction Loss # #
 def node_reconstruction_loss(
-        token_logits: torch.Tensor,
-        token_ids: torch.Tensor,
-        pad_id: int,
-        label_smoothing: float = 0.0,
-        reduction: str = "mean"
+        pred_embeds: torch.Tensor,
+        target_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        w_mse: float = 1.0,
+        w_cosine: float = 1.0
 ) -> torch.Tensor:
     """
-    Cross-Entropy reconstruction loss over fully tokenized sequences.
-    Measures how faithfully the Decoder Head recovers the original token sequence for each node from its CA-DGN latent embedding.
-
-    Full Gradient Flow: loss -> token_logits -> DecoderHead -> CADGNDecoder -> Z -> CADGNEncoder -> H -> EncoderHead
-    :param token_logits: tensor of shape (num_nodes, seq_len, vocab_size); Raw logits from DecoderHead (not softmaxed)
-    :param token_ids: tensor of shape (num_nodes, seq_len) LongTensor; Ground truth, same token_ids fed to Encoder Head
-    :param pad_id: Token ID for padding, these positions are ignored; from `family.tokenizer.pad_token_id`
-    :param label_smoothing: In range [0, 1). 0.0 = Hard Targets. Not recommended for Stage 1 where the reconstruction target should be precise. Consider 0.005-0.1 for Stage 2 where the reconstruction signal is a softer constraint.
-    :param reduction: the kind of reduction in which to produce the scalar - e.g. 'sum' or 'mean'
-    :return: Scalar cross-entropy; mean over all non-padding token positions.
+    Masked reconstruction loss in LLM embedding space
+    Combines two loss terms:
+        - `L_mse` penalises absolute deviation in embedding space (magnitude)
+        - `L_cosine` penalises directional deviation, ensuring vectors point in the same semantic direction.
+    :param pred_embeds: (num_nodes, seq_len, llm_dim) ; DecoderHead output
+    :param target_embeds: (num_nodes, seq_len, llm_dim) ; LLM Embedding Layer output. (Detatched within this scope)
+    :param attention_mask: (num_nodes, seq_len) - 1 for all real tokens, 0 for padding. Same mask as from the HuggingFace tokenizer
+    :param w_mse: Weight on MSE term (default 1.0)
+    :param w_cosine: Weight on cosine similarity term (default 1.0)
+    :return: Scalar loss; w_mse * L_mse + w_cosine * L_cosine
     """
 
-    N,S, V = token_logits.shape
+    mask = attention_mask.detach()
 
-    return F.cross_entropy(
-        token_logits.reshape(N * S, V),  # (N*S, V)
-        token_ids.reshape(N*S),  # (N * S, )
-        ignore_index=pad_id,
-        label_smoothing=label_smoothing,
-        reduction=reduction,
-    )
+    mask = attention_mask.unsqueeze(-1).float()
+    # (num_nodes, seq_len, 1) - broadcasts over llm_dim
+
+    # MSE Term
+    # sum() first, and then nromalize by real token count to avoid diluting the signal with padding
+    L_mse = F.mse_loss(pred_embeds * mask, target_embeds * mask, reduction='sum')
+    num_elements = mask.sum() * pred_embeds.shape[-1]  # N_tokens * llmdim
+    L_mse = L_mse / num_elements.clamp(min=1.0)
+
+    # Cosine Term
+    # 1 - cos_sim: perfect = 0, orthogonal=1, opposite=2
+    cos_sim = F.cosine_similarity(pred_embeds, target_embeds, dim=-1)
+    # (num_nodes, seq_len)
+
+    mask_2d = attention_mask.float()
+
+    L_cosine = ((1.0 - cos_sim) * mask_2d).sum()
+    L_cosine = L_cosine / mask_2d.sum().clamp(min=1.0)
+
+    return w_mse * L_mse + w_cosine * L_cosine
+
 
 
 # # Embedding Norm Loss # #
@@ -333,9 +347,10 @@ def embedding_norm_loss(
 # # Convenient Wrapper for all losses above # #
 # Stage 1
 def reconstruction_loss(
-        token_logits: torch.Tensor,
-        token_ids: torch.Tensor,
-        pad_id: int,
+        pred_node_embeds: torch.Tensor,
+        true_node_embeds: torch.Tensor,
+        node_attention_mask: torch.Tensor,
+
         edge_logits: torch.Tensor,
         candidate_pairs: torch.Tensor,
         true_edge_index: torch.Tensor,
@@ -344,7 +359,10 @@ def reconstruction_loss(
         w_nodes: float = 1.0,
         w_edges: float = 1.0,
         w_norm: float = 0.01,
-        label_smoothing: float = 0.0,
+
+        nodes_w_mse: float = 1.0,
+        nodes_w_cosine: float = 1.0,
+
         auto_pos_weight: bool = True,
         norm_epsilon: float = 1e-8,
         norm_w_preserve: float = 1.0,
@@ -354,9 +372,7 @@ def reconstruction_loss(
     """
     Computes all three losses for one family's forward pass. (Stage 1)
     Returns a dict so individual components are accessible for logging without recomputing. The top-level 'loss' key is the only tensor that is available for gradients.
-    :param token_logits: tensor of shape (num_nodes, seq_len, vocab_size); Raw logits from DecoderHead (not softmaxed)
-    :param token_ids: tensor of shape (num_nodes, seq_len) LongTensor; Ground truth, same token_ids fed to Encoder Head
-    :param pad_id: Token ID for padding, these positions are ignored; from `family.tokenizer.pad_token_id`
+
     :param edge_logits: tensor of shape (num_candidates,); raw GraphBuilder scores
     :param candidate_pairs: tensor of shape (2, num_candidates); from `_generate_candidate_pairs()`
     :param true_edge_index: tensor of shape (2, num_true_edges); ground truth directed edges
@@ -365,7 +381,7 @@ def reconstruction_loss(
     :param w_nodes: Overall weight for the node reconstruction loss of the loss function
     :param w_edges: Overall weight for the edge reconstruction loss of the loss function
     :param w_norm:  Overall weight for norm preservation loss of the loss function
-    :param label_smoothing: For Node Reconstruction cross-entropy. In range [0, 1). 0.0 = Hard Targets. Not recommended for Stage 1 where the reconstruction target should be precise. Consider 0.005-0.1 for Stage 2 where the reconstruction signal is a softer constraint.
+
     :param auto_pos_weight: Compute pos_weight for edge BCE automatically (recommended: True)
     :param norm_epsilon: For embedding norm loss: Numerical floor for log, prevents log(0) in edge cases
     :param norm_w_preserve: For embedding norm loss: Weight on norm preservation term
@@ -374,11 +390,11 @@ def reconstruction_loss(
     :return: dict with keys: ['loss', 'L_nodes', 'L_edges', 'L_norm'], only 'loss' is gradient attached.
     """
     L_nodes = node_reconstruction_loss(
-        token_logits=token_logits,
-        token_ids=token_ids,
-        pad_id=pad_id,
-        label_smoothing=label_smoothing,
-        reduction=reduction,
+        pred_embeds=pred_node_embeds,
+        target_embeds=true_node_embeds,
+        attention_mask=node_attention_mask,
+        w_mse=nodes_w_mse,
+        w_cosine=nodes_w_cosine,
     )
 
     L_edges = edge_reconstruction_loss(
