@@ -100,8 +100,8 @@ class CADGNDecoder(nn.Module):
         """
 
         :param ca_dgn_dim: The hidden dimension in which ca_dgn_dim operates in.
-        :param expansion:
-        :param dropout:
+        :param expansion: Feed-Forward Network Expansion Factor.
+        :param dropout: Dropout percentage for training.
         """
         super(CADGNDecoder, self).__init__()
         self.norm = nn.LayerNorm(ca_dgn_dim)
