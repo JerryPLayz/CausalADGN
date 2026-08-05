@@ -84,3 +84,51 @@ class CADGNEncoder(nn.Module):
             x = self.dropout(x)
 
         return self.norm(x)
+
+
+class CADGNDecoder(nn.Module):
+    """
+    Shared per-node MLP decoder between the CADGNEncoder and all DecoderHeads.
+    Operates entirely in ca_dgn_dim.
+    Each node is processed identically and independently.
+    """
+    def __init__(self,
+                 ca_dgn_dim,
+                 expansion: int=4,
+                 dropout: float = 0.1
+                 ):
+        """
+
+        :param ca_dgn_dim: The hidden dimension in which ca_dgn_dim operates in.
+        :param expansion:
+        :param dropout:
+        """
+        super(CADGNDecoder, self).__init__()
+        self.norm = nn.LayerNorm(ca_dgn_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(ca_dgn_dim, ca_dgn_dim * expansion),
+            nn.GELU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(ca_dgn_dim * expansion, ca_dgn_dim),
+            nn.Dropout(p=dropout),
+        )
+
+        self.out_norm = nn.LayerNorm(ca_dgn_dim)
+        self._init_weights()
+
+    def forward(self, Z):
+        """
+
+        :param Z: (num_nodes, ca_dgn_dim) Neighbourhood-aware per-node embeddings from CADGNEncoder.
+        :return: (num_nodes, ca_dgn_dim) Enriched per-node embeddings, attempting to universally transform all node embeddings to promote reconstruction of the original.
+        """
+        return self.out_norm(Z + self.ffn(self.norm(Z)))
+
+    def _init_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+
