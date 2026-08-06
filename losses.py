@@ -250,7 +250,7 @@ def edge_reconstruction_loss(
     elif auto_pos_weight:
         num_pos = gt.sum().clamp(min=1.0)
         num_neg = (gt == 0.0).float().sum()
-        weight = (num_neg / num_pos).unsqueeze(0)
+        weight = (num_neg / num_pos)  #.unsqueeze(0)
     else:
         weight = None
 
