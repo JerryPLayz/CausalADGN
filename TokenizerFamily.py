@@ -10,9 +10,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from heads import EncoderHead, DecoderHead
 from stager import Staged
 from projectors import Projector
+from GateClassifier import GateClassifier
 
 
-## todo: Implement Gate Classifier
 class TokenizerFamily(nn.Module, Staged):
     """
     Container for all components specific to one LLM tokenizer family.
@@ -29,6 +29,7 @@ class TokenizerFamily(nn.Module, Staged):
             decoder_head: DecoderHead,
             pre_projector: Projector,
             post_projector: Projector,
+            gate_classifier: GateClassifier,
             llm_dim: int,
             ca_dgn_dim: int,
             max_seq_len: int,
@@ -36,6 +37,8 @@ class TokenizerFamily(nn.Module, Staged):
             decoder_dropout: float = 0.1,
             projector_expansion: int = 2,
             projector_dropout: float = 0.1,
+            gate_cls_scale: int = 8,
+            gate_cls_dropout: float = 0.1,
     ):
         super().__init__()
 
@@ -49,7 +52,7 @@ class TokenizerFamily(nn.Module, Staged):
         self.decoder_head = decoder_head
         self.pre_projector = pre_projector
         self.post_projector = post_projector
-
+        self.gate_classifier = gate_classifier
 
         # Stored verbatim
         self._config = {
@@ -64,6 +67,8 @@ class TokenizerFamily(nn.Module, Staged):
             # Needed to reconstruct nn.Embedding on load() without the LLM
             "vocab_size": embed_layer.num_embeddings,
             "padding_idx": embed_layer.padding_idx,
+            "gate_cls_scale": gate_cls_scale,
+            "gate_cls_dropout": gate_cls_dropout,
 
         }
 
@@ -77,6 +82,8 @@ class TokenizerFamily(nn.Module, Staged):
             decoder_dropout: float = 0.1,
             projector_expansion: int = 2,
             projector_dropout: float = 0.1,
+            gate_cls_scale: int = 8,
+            gate_cls_dropout: float = 0.1,
             device: str | torch.device = "cuda",
             torch_dtype: torch.dtype = torch.bfloat16,
     ) -> TokenizerFamily:
@@ -92,6 +99,8 @@ class TokenizerFamily(nn.Module, Staged):
         :param decoder_dropout:  Dropout in DecoderHead (default 0.1)
         :param projector_expansion:  Hidden dim scalar multiple for projectors.
         :param projector_dropout:  Dropout in pre/post Projectors (default 0.1)
+        :param gate_cls_scale:  Scalar divider for gate layers, to compress down by in dynamic n-layers (default 8)
+        :param gate_cls_dropout:  Dropout between layers in the gate classifier (default 0.1)
         :param device:  Target Device for all nn.Modules
         :param torch_dtype: LLM weight dtype. bfloat16 recommended, as it matches typical LLM release formats and halves memory vs float32 for the embedding table.
         :return: `TokenizerFamily` object
@@ -150,6 +159,12 @@ class TokenizerFamily(nn.Module, Staged):
             dropout=projector_dropout,
         ).to(device)
 
+        gate_classifier = GateClassifier(
+            llm_dim=llm_dim,
+            scale=gate_cls_scale,
+            dropout=gate_cls_dropout,
+        ).to(device)
+
         return cls(
             model_id=model_id,
             tokenizer=tokenizer,
@@ -158,6 +173,7 @@ class TokenizerFamily(nn.Module, Staged):
             decoder_head=decoder_head,
             pre_projector=pre_projector,
             post_projector=post_projector,
+            gate_classifier=gate_classifier,
             llm_dim=llm_dim,
             ca_dgn_dim=ca_dgn_dim,
             max_seq_len=max_seq_len,
@@ -165,6 +181,8 @@ class TokenizerFamily(nn.Module, Staged):
             decoder_dropout=decoder_dropout,
             projector_expansion=projector_expansion,
             projector_dropout=projector_dropout,
+            gate_cls_scale=gate_cls_scale,
+            gate_cls_dropout=gate_cls_dropout,
         )
 
     # Persistence on Disk (save/load)
@@ -231,6 +249,12 @@ class TokenizerFamily(nn.Module, Staged):
             dropout=config["projector_dropout"],
         )
 
+        gate_classifier = GateClassifier(
+            llm_dim=config["llm_dim"],
+            scale=config["gate_cls_scale"],
+            dropout=config["gate_cls_dropout"],
+        )
+
         # Assemble and Restore the full object
         instance = cls(
             model_id=model_id,
@@ -240,6 +264,7 @@ class TokenizerFamily(nn.Module, Staged):
             decoder_head=decoder_head,
             pre_projector=pre_projector,
             post_projector=post_projector,
+            gate_classifier=gate_classifier,
             llm_dim=config["llm_dim"],
             ca_dgn_dim=config["ca_dgn_dim"],
             max_seq_len=config["max_seq_len"],
@@ -247,6 +272,8 @@ class TokenizerFamily(nn.Module, Staged):
             decoder_dropout=config["decoder_dropout"],
             projector_expansion=config["projector_expansion"],
             projector_dropout=config["projector_dropout"],
+            gate_cls_scale=config["gate_cls_scale"],
+            gate_cls_dropout=config["gate_cls_dropout"],
         )
 
         state = torch.load(
@@ -275,7 +302,7 @@ class TokenizerFamily(nn.Module, Staged):
         # Freeze Stage 2 Components if already registered
         self.pre_projector.requires_grad_(False)
         self.post_projector.requires_grad_(False)
-
+        self.gate_classifier.requires_grad_(False)
 
     def configure_stage2(self):
         """
@@ -295,6 +322,7 @@ class TokenizerFamily(nn.Module, Staged):
         # Trainable in Stage 2
         self.pre_projector.requires_grad_(True)
         self.post_projector.requires_grad_(True)
+        self.gate_classifier.requires_grad_(True)
 
 
 
