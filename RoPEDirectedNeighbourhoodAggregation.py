@@ -1,4 +1,5 @@
 from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import remove_self_loops
 import torch
 import torch.nn as nn
 import math
@@ -22,6 +23,7 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
         super(RoPEDirectedNeighborhoodAggregation, self).__init__(aggr='add')
         self.hidden_dim = hidden_dim
         self.base = base
+        assert hidden_dim % 2 == 0, f"hidden_dim must be even for RoPE pairing, got {hidden_dim}"
 
         ## Parameters
         # Learnable direction-specific scalers
@@ -31,6 +33,16 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
         # Fixed frequency indices - not learnable (consistent with RoFormer)
         i = torch.arange(0, hidden_dim // 2, dtype=torch.float32)
         self.register_buffer('freq_indices', i)
+
+        self.W_self = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_normal_(self.W, a=math.sqrt(5))
+        nn.init.ones_(self.alpha_cause)
+        nn.init.ones_(self.alpha_effect)
+
+
 
     def debug_get_skew_symmetric_matrix(self, layer: int, alpha: torch.Tensor):
         """
@@ -50,7 +62,7 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
         d = self.hidden_dim
         #   See RoFormer P3.3                   (-2 * i) / d
         theta_i = layer * alpha * (self.base ** (-2.0 * self.freq_indices / d)) ## TODO: check this formulation is correct
-        Omega = torch.zeros(d,d, device=theta_i.device, dtype=theta.dtype)
+        Omega = torch.zeros(d,d, device=theta_i.device, dtype=theta_i.dtype)
         even_idx = torch.arange(0, d, 2, device=theta_i.device)  # [0, 2, 4, ..., d-2]
         odd_idx = torch.arange(1, d, 2, device=theta_i.device)   # [1, 3, 5, ..., d-1]
 
@@ -124,12 +136,14 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
                 layer: int = 1
                 ) -> torch.Tensor:
         """
-        Returns Psi_c(u) - Psi_e(u) for all nodes u simultaneously.
+        Returns Psi_c(u) - Psi_e(u) + Psi_self for all nodes u simultaneously.
         Psi_c(u) aggregates over all nodes that CAUSE u (nodes where edge v->u exists, incoming to u)
-          After Rotation by R_cause^(l)
+          After Rotation by R_cause^(l) - No Self-Loops
 
         Psi_e(u) aggregates over all nodes that u CAUSES (nodes v where u->v exists, outgoing from u)
-          After Rotation by R_effect^(l)
+          After Rotation by R_effect^(l) - No Self-Loops
+
+        Psi_self adds to the embedding if and only if the node has a self-loop (that is `(i,i)∈ℰ`  for any `i∈V`)
 
         edge_index convention:
           edge_index[0] = source (cause)
@@ -140,16 +154,27 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
         :param layer:
         :return:
         """
-        ## TODO: implement self-loop contributions (might require graph changes to support)
+        # Ensure that no self-loop contribution gets added to cause/effect (only via W_self)
+        self_loop_mask = edge_index[0] == edge_index[1]  # (num_edges, ) bool
+        self_loop_nodes = edge_index[0, self_loop_mask]  # node indices with self-loops
+        edge_index_no_self, _ = remove_self_loops(edge_index)
 
+        # Psi_cause = incoming neighbors only (no self-loops)
         x_cause_rot = self.apply_rotation(x, layer, self.alpha_cause)
-        psi_c = self.propagate(edge_index, x=x_cause_rot)
+        psi_c = self.propagate(edge_index_no_self, x=x_cause_rot)
 
+        # Psi_effect = outgoing neighbors only (no self-loops)
         x_effect_rot = self.apply_rotation(x, layer, self.alpha_effect)
-        edge_index_rev = edge_index.flip(0)
+        edge_index_rev = edge_index_no_self.flip(0)
         psi_e = self.propagate(edge_index_rev, x=x_effect_rot)
 
-        return psi_c - psi_e
+        # Self-loop contribution exists where i=j (along diagonal only), only for nodes that have them.
+        #  W - W^T antisymmetry again
+        W_self_asym = self.W_self - self.W_self.t()
+        psi_self = torch.zeros_like(x)  # make empty tensor of shape X (zeros everywhere)
+        psi_self[self_loop_nodes] = x[self_loop_nodes] @ W_self_asym.t()  # only replace values for nodes that have self-loops
+
+        return psi_c - psi_e + psi_self
 
     def message(self, x_j: torch.Tensor):
         # No additional transformation needed here (rotation will be applied out of scope)

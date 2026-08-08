@@ -20,7 +20,6 @@ class CADGNConv(nn.Module):
     W - W^T:     The core Skew-Symmetric element of A-DGN, purely imaginary eigenvalues.
 
     """
-    # TODO: Add in Self-Loop Contribution
 
     def __init__(
             self,
@@ -33,7 +32,7 @@ class CADGNConv(nn.Module):
             bias: bool = True
     ):
         super(CADGNConv, self).__init__()
-        assert hidden_dim > 0, f"hidden_dim must be > 0. Got {hidden_dim=}."
+        assert hidden_dim > 0 and hidden_dim % 2 == 0, f"hidden_dim must be > 0 and must be even. Got {hidden_dim=}."
         assert num_iters > 0, f"num_iters must be > 0. Got {num_iters=}."
         self.num_iters = num_iters
         self.hidden_dim = hidden_dim

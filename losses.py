@@ -163,8 +163,9 @@ def _generate_candidate_pairs(
     if batch_vector is None:
         src = torch.arange(num_nodes, device=device).repeat_interleave(num_nodes)
         dst = torch.arange(num_nodes, device=device).repeat(num_nodes)
-        mask = src != dst # todo: remove when self-loops are permitted
-        return torch.stack(src[mask], dst[mask])
+        # mask = src != dst # self-loops permitted
+        #return torch.stack(src[mask], dst[mask])
+        return torch.stack([src, dst])
 
     # Batched graphs: pairwise only within same graph
     src_parts: list[torch.Tensor] = []
@@ -175,15 +176,14 @@ def _generate_candidate_pairs(
         nodes = (batch_vector == g_idx).nonzero(as_tuple=True)[0]
         n_g = len(nodes)
 
-        if n_g < 2:
-            # Single node graph, no valid pairs
-            continue
         # All directed pairs within this graph (using global indices)
         i = nodes.repeat_interleave(n_g)  # (n_g^2, )
-        j = nones.repeat(n_g)  # (n_g^2, )
-        within_mask = i != j  # todo: remove when self-loops are permitted
-        src_parts.append(i[within_mask])
-        dst_parts.append(j[within_mask])
+        j = nodes.repeat(n_g)  # (n_g^2, )
+        #within_mask = i != j # self-loops permitted.
+        #src_parts.append(i[within_mask])
+        src_parts.append(i)
+        #dst_parts.append(j[within_mask])
+        dst_parts.append(j)
 
     if not src_parts:
         # All single-node graphs
