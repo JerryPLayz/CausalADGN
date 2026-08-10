@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<module version="4">
+<module type="PYTHON_MODULE" version="4">
   <component name="NewModuleRootManager">
-    <orderEntry type="jdk" jdkName="WSL (Ubuntu): (/home/jerry/venvs/CausalADGN_venv/venv/bin/python3.11)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="D:\Python Projects\CausalADGN\venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

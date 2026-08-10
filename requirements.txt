@@ -38,7 +38,7 @@ ogb
 openpyxl
 
 # Ray (hyperparameter tuning: pinned for Python 3.11 compat)
-"ray[tune]>=2.0.0"
+ray[tune]>=2.0.0
 
 # Manim (for animations)
 manim
