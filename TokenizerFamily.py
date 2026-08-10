@@ -7,13 +7,12 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier
+from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, ModuleMixin
 
 from stager import Staged
 
 
-
-class TokenizerFamily(nn.Module, Staged):
+class TokenizerFamily(nn.Module, Staged, ModuleMixin):
     """
     Container for all components specific to one LLM tokenizer family.
     This is not a pipeline object, simply a structure to make checkpointing simple.

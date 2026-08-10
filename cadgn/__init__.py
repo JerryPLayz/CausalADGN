@@ -5,6 +5,7 @@ from .GraphBuilder import GraphBuilder
 from .heads import EncoderHead, DecoderHead
 from .projectors import Projector
 from .RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighborhoodAggregation as RoPE_DNA
+from .ModuleMixin import ModuleMixin
 
 __all__ = [
     "CADGNEncoder",
@@ -15,6 +16,7 @@ __all__ = [
     "EncoderHead",
     "DecoderHead",
     "Projector",
-    "RoPE_DNA"
+    "RoPE_DNA",
+    "ModuleMixin",
 ]
 

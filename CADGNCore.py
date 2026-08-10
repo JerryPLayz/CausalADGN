@@ -13,10 +13,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from cadgn import CADGNEncoder, CADGNDecoder, GraphBuilder
+from cadgn import CADGNEncoder, CADGNDecoder, GraphBuilder, ModuleMixin
 
 
-class CADGNCore(nn.Module, Staged):
+class CADGNCore(nn.Module, Staged, ModuleMixin):
     self.SAVE_LOAD_PREFIX = "CADGNCore"
     def __init__(
             self,
