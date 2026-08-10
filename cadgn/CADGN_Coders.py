@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, Optional, Union
 from torch_geometric.typing import Adj
 
 from .CADGNConv import CADGNConv
-from graph_utils import *
+from .graph_utils import *
 
 
 class CADGNEncoder(nn.Module):
@@ -98,7 +98,6 @@ class CADGNDecoder(nn.Module):
                  dropout: float = 0.1
                  ):
         """
-
         :param ca_dgn_dim: The hidden dimension in which ca_dgn_dim operates in.
         :param expansion: Feed-Forward Network Expansion Factor.
         :param dropout: Dropout percentage for training.
