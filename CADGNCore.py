@@ -18,7 +18,7 @@ from stager import Staged
 
 
 class CADGNCore(nn.Module, Staged, ModuleMixin):
-    self.SAVE_LOAD_PREFIX = "CADGNCore"
+    SAVE_LOAD_PREFIX = "CADGNCore"
     def __init__(
             self,
             ca_dgn_dim: int,
