@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
-from graph_utils import GraphBatch, _RequiredBatchFields
+from cadgn.graph_utils import GraphBatch, _RequiredBatchFields
+#from graph_utils import GraphBatch, _RequiredBatchFields
 from dataclasses import dataclass
 from CADGNCore import CADGNCore
 from TokenizerFamily import TokenizerFamily
@@ -16,7 +17,7 @@ class Stage1Config:
     """
     All hyperparameters for Stage 1 training. (grid search over these and the model hyperparameters as well)
     Preferred init via dict:
-        config = Stage1Config(**param_grid_entry
+        config = Stage1Config(**param_grid_entry)
     """
     # Optimizer
     lr: float = 1e-4
@@ -320,7 +321,7 @@ class CADGNTrainer:
                 checkpoint_dir is not None
                 and (epoch+1) % checkpoint_every == 0
             ):
-                self._save_checkpoint(checkpoint_dir=checkpoint_dir, epoch+1)
+                self._save_checkpoint(checkpoint_dir=checkpoint_dir, epoch=epoch+1)
 
         return history
 
