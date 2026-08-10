@@ -80,6 +80,7 @@ pip install \
     ogb \
     openpyxl \
     "ray[tune]>=2.0.0" \
+    "datasets[torch]" \
     manim
 
 # 9. Verify installation

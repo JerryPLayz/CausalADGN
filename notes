@@ -1,0 +1,27 @@
+# Dataset Options
+
+## CLadder
+https://arxiv.org/abs/2312.04350
+    - https://huggingface.co/datasets/causal-nlp/CLadder
+    - https://github.com/causalNLP/cladder
+    - Yes, its workable, because it provides `graph_id`s, we can cross reference a structure and then replace the node names in our version.
+
+
+
+## METER: Evaluating Multi-Level Contextual Causal Reasoning in LLMs
+    - https://arxiv.org/pdf/2604.11502v2
+    - https://github.com/SCUNLP/METER
+    - Seems most promising (except no graphs)
+
+## CausalDS (ACL 2026)
+https://arxiv.org/html/2607.08093
+    - https://github.com/andleb/causalds/tree/main/data
+    - https://huggingface.co/datasets/andleb/causalds
+
+
+NOT RECOMMENDED:
+
+## CausalGraph2LLM
+https://aclanthology.org/2025.findings-naacl.110/
+    - https://github.com/ivaxi0s/CausalGraph2LLM/tree/main
+- Semantic Nodes, Directed Graphs, Some Intervention Reasoning (in contextual subset)
