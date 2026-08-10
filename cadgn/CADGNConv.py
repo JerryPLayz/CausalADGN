@@ -4,7 +4,7 @@ import math
 import numpy as np
 from typing import Any, Callable, Dict, Optional, Union
 
-from RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighborhoodAggregation
+from .RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighborhoodAggregation
 from torch_geometric.nn.inits import zeros
 from torch_geometric.nn.resolver import activation_resolver
 from torch_geometric.typing import Adj

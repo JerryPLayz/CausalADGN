@@ -13,9 +13,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from CADGN_Coders import *
-from GraphBuilder import GraphBuilder
-from stager import Staged
+from cadgn import CADGNEncoder, CADGNDecoder, GraphBuilder
 
 
 class CADGNCore(nn.Module, Staged):

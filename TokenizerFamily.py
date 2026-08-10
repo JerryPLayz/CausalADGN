@@ -7,10 +7,10 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from heads import EncoderHead, DecoderHead
+from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier
+
 from stager import Staged
-from projectors import Projector
-from GateClassifier import GateClassifier
+
 
 
 class TokenizerFamily(nn.Module, Staged):

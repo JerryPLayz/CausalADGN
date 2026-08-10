@@ -5,7 +5,7 @@ import numpy as np
 from typing import Any, Callable, Dict, Optional, Union
 from torch_geometric.typing import Adj
 
-from CADGNConv import CADGNConv
+from .CADGNConv import CADGNConv
 from graph_utils import *
 
 
