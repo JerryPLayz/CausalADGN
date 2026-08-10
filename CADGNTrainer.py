@@ -1,9 +1,11 @@
+from pathlib import Path
 from typing import Iterable
 
 from graph_utils import GraphBatch, _RequiredBatchFields
 from dataclasses import dataclass
 from CADGNCore import CADGNCore
 from TokenizerFamily import TokenizerFamily
+from losses import _generate_candidate_pairs, reconstruction_loss, generalized_mmd_loss
 
 import torch
 import torch.nn as nn
@@ -81,6 +83,30 @@ class CADGNTrainer:
         for fam in self.families:
             fam.to(device)
 
+    # Persistence
+    def _save_checkpoint(
+            self,
+            checkpoint_dir: str | Path,
+            epoch: int
+    ) -> None:
+        f"""
+        Save core and all families under a shared epoch directory
+        Layout:
+            {checkpoint_dir}/epoch_{epoch:04d}/
+                cadgn_core/
+                {model_id}/ (one per family)
+        :param checkpoint_dir: directory to checkpoint to. 
+        :param epoch: the current epoch
+        :return: None
+        """
+        root = Path(checkpoint_dir) / f"epoch_{epoch:04d}"
+
+        self.core.save(path=root / "cadgn_core", model_id=f"{self.core.encoder.conv.__name__[:10]}-{self.core.encoder.hidden_dim}")
+
+        for fam in self.families:
+            safe_name = fam.model_id.replace("/", "-")
+            fam.save(root / safe_name, model_id=fam.model_id)
+
     # Optimizer Construction
     def _build_stage1_optimizer(
             self,
@@ -109,5 +135,213 @@ class CADGNTrainer:
         :return: AdamW Optimizer
         """
         return torch.optim.AdamW(
-            list(family.trainable_parameters)
+            list(family.trainable_parameters),
+            lr=config.lr,
+            weight_decay=config.weight_decay,
         )
+
+    def _stage1_step(
+            self,
+            batch: GraphBatch,
+            config: Stage1Config
+    ) -> dict[str, torch.Tensor]:
+        """
+        Single Forward Pass for Stage 1. Runs the full pipeline once per family. Candidate paris are generated once and shared (graph topology identical)
+        :param batch:
+        :param config:
+        :return: Flat metrics dict (only 'loss' is gradient-attached)
+        """
+        edge_index = batch['edge_index'].to(self.device)
+        node_texts = batch['node_texts']
+        batch_vector = batch.get('batch_vector')
+
+        if batch_vector is not None:
+            batch_vector = batch_vector.to(self.device)
+
+        # Generate candidate pairs
+        candidate_pairs = _generate_candidate_pairs(
+            num_nodes=len(node_texts),
+            batch_vector=batch_vector,
+            device=self.device,
+        )
+
+        H_dict: dict[str, torch.Tensor] = {}
+        total_loss = torch.tensor(0.0, device=self.device)
+        metrics: dict[str, torch.Tensor] = {}
+
+        for family in self.families:
+            name = family.model_id
+
+            # Tokenize
+            tokens = family.tokenizer(
+                node_texts,
+                padding=True,
+                truncation=True,
+                max_length=family.encoder_head.max_length,
+                return_tensors="pt",
+            ).to(self.device)
+
+            # Embeddings
+            with torch.no_grad():
+                embeds = family.embed_layer(tokens.input_ids)
+            # (num_nodes, seq_len, llm_dim)
+
+            # Encoder Head -> H
+            H = family.encoder_head(embeds, tokens.attention_mask)
+            H_dict[name] = H
+
+            # CADGN-Encoder -> Z
+            Z = self.core.encoder(H, edge_index)
+
+            # CADGN_Decoder -> Z_dec
+            Z_dec = self.core.decoder(Z)
+
+            # DecoderHead -> pred_embeds
+            pred_embeds = family.decoder_head(Z_dec, tokens.attention_mask)
+
+            # Graph Builder -> edge_logits
+            edge_logits = self.core.graph_builder(Z, candidate_pairs)
+
+            fam_losses = reconstruction_loss(
+                pred_embeds = pred_embeds,
+                true_node_embeds = embeds,
+                node_attention_mask = tokens.attention_mask,
+                edge_logits=edge_logits,
+                candidate_pairs=candidate_pairs,
+                true_edge_index=edge_index,
+                Z=Z,
+                H=H,
+
+                w_nodes=config.w_nodes,
+                w_edges=config.w_edges,
+                w_norm=config.w_norm,
+                nodes_w_mse=config.w_mse,
+                nodes_w_cosine=config.w_cosine,
+                auto_pos_weight=config.auto_pos_weight,
+                norm_w_preserve=config.norm_w_preserve,
+                norm_w_floor=config.norm_w_floor,
+                reduction='mean'
+            )
+
+            total_loss += fam_losses['loss']
+            metrics[f"{name}/L_nodes"] = fam_losses['L_nodes']
+            metrics[f"{name}/L_edges"] = fam_losses['L_edges']
+            metrics[f"{name}/L_norm"] = fam_losses['L_norm']
+
+        # EOL
+
+        # MMD loss across all k-family H tensors (must be done at this scope)
+        L_mmd = generalized_mmd_loss(
+            H_dict=H_dict,
+            kernel=config.mmd_kernel,
+            beta=config.mmd_beta,
+        )
+
+        total_loss = total_loss + config.w_mmd * L_mmd
+
+        return {
+            "loss": total_loss,
+            "L_mmd": L_mmd.detach(),
+            **metrics
+        }
+
+    def train_stage1(
+            self,
+            *,
+            config: Stage1Config,
+            train_dataloader,
+            val_dataloader=None,
+            checkpoint_dir: Optional[str | Path] = None,
+            checkpoint_every: int = 10,
+    ) -> dict[str, list[float]]:
+        """
+        Trains Stage 1 across all TokenizerFamily objects.
+        Configures all modules for Stage 1, builds a joint optimizer, and runs the full training loop.
+        :param config: Stage1Config; all training hyperparameters
+        :param train_dataloader: Yields GraphBatch dicts
+        :param val_dataloader: Optional; Validation metrics are computed after each epoch and logged under 'val/' keys.
+        :param checkpoint_dir: Optional; Saves core + all families to disk every checkpoint_every epochs.
+        :param checkpoint_every: Epoch interval for checkpointing (default 10)
+        :return: history; metric name -> list of per-epoch averages.
+        """
+        self.core.configure_stage1()
+        for fam in self.families:
+            fam.configure_stage1()
+
+        optimizer = self._build_stage1_optimizer(config=config)
+        history = dict[str, list[float]] = {}
+
+        for epoch in range(config.epochs):
+            # Train
+            self.core.train()
+            for fam in self.families:
+                fam.train()
+
+            epoch_metrics: dict[str, list[float]] = {}
+
+            for batch in train_dataloader:
+                optimizer.zero_grad()
+
+                step = self._stage1_step(batch=batch, config=config)
+                step["loss"].backward()
+
+                if config.grad_clip > 0.0:
+                    nn.utils.clip_grad_norm_(
+                        [
+                            p for src in [self.core, *self.families]
+                            for p in src.parameters()
+                            if p.requires_grad
+                        ],
+                        config.grad_clip
+                    )
+                optimizer.step()
+
+                for k,v in step.items():
+                    epoch_metrics.setdefault(k, []).append(
+                        v.item() if isinstance(v, torch.Tensor) else v
+                    )
+
+            # Epoch averages over all batches
+            epoch_avg = {
+                k: sum(v) / len(v)
+                for k, v in epoch_metrics.items()
+            }
+            # Validate
+            if val_dataloader is not None:
+                val_avg = self._eval_stage1(val_dataloader=val_dataloader, config=config)
+                for k,v in val_avg.items():
+                    epoch_avg[f"val/{k}"] = v
+
+            for k,v in epoch_avg.items():
+                history.setdefault(k, []).append(v)
+
+            # Checkpoint
+            if (
+                checkpoint_dir is not None
+                and (epoch+1) % checkpoint_every == 0
+            ):
+                self._save_checkpoint(checkpoint_dir=checkpoint_dir, epoch+1)
+
+        return history
+
+    @torch.no_grad()
+    def _eval_stage1(
+            self,
+            val_dataloader,
+            config: Stage1Config,
+    ) -> dict[str, float]:
+        """Validation pass, no gradients. Returns per-metric batch averages."""
+        self.core.eval()
+        for fam in self.families:
+            fam.eval()
+
+        all_metrics: dict[str, list[float]] = {}
+
+        for batch in val_dataloader:
+            step = self._stage1_step(batch=batch, config=config)
+            for k,v in step.items():
+                all_metrics.setdefault(k, []).append(
+                    v.item() if isinstance(v, torch.Tensor) else v
+                )
+        return {k: sum(v) / len(v) for k, v in all_metrics.items()}
+

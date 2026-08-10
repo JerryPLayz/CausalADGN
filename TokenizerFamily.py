@@ -6,6 +6,7 @@ from typing import Optional, Iterable
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import TokenizersBackend, SentencePieceBackend
 
 from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, ModuleMixin
 
@@ -22,7 +23,7 @@ class TokenizerFamily(nn.Module, Staged, ModuleMixin):
     def __init__(
             self,
             model_id: str,
-            tokenizer,
+            tokenizer: TokenizersBackend | SentencePieceBackend,
             embed_layer: nn.Embedding,
             encoder_head: EncoderHead,
             decoder_head: DecoderHead,

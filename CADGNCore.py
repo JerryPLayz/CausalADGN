@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from cadgn import CADGNEncoder, CADGNDecoder, GraphBuilder, ModuleMixin
+from stager import Staged
 
 
 class CADGNCore(nn.Module, Staged, ModuleMixin):
