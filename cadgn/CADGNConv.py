@@ -8,7 +8,7 @@ from .RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighborhoodAggreg
 from torch_geometric.nn.inits import zeros
 from torch_geometric.nn.resolver import activation_resolver
 from torch_geometric.typing import Adj
-
+from torch.nn import functional as F
 
 class CADGNConv(nn.Module):
     """

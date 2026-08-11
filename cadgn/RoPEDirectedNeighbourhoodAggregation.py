@@ -38,7 +38,7 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.kaiming_normal_(self.W, a=math.sqrt(5))
+        nn.init.kaiming_normal_(self.W_self, a=math.sqrt(5))
         nn.init.ones_(self.alpha_cause)
         nn.init.ones_(self.alpha_effect)
 

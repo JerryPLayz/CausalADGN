@@ -96,18 +96,3 @@ def precompute_diameter(dataset):
             d = single_graph_diameter(data.edge_index, data.num_nodes)
             data.diameter = torch.tensor(d, dtype=torch.long)
 
-
-class _RequiredBatchFields(TypedDict):
-    node_texts: list[str]  # raw text per node; tokenized per family inside the trainer
-    edge_index: torch.Tensor # (2, num_edges); graph connectivity
-
-
-class GraphBatch(_RequiredBatchFields, total=False):
-    """
-    Expected batch format yielded by the data loader:
-
-    node_texts: list[str]  - Raw text label for each node. Tokenization happens inside the training step, independent per family.
-    edge_index: torch.Tensor of shape (2, num_edges) in COO format. Used as both graph connectivity for CADGNEncoder and ground truth for edge reconstruction loss.
-    batch_vector: torch.Tensor of shape (num_nodes,) mapping each node to a graph index. Omit (or None) for a single graph.
-    """
-    batch_vector: torch.Tensor  # optional, for multi-graph batches only.

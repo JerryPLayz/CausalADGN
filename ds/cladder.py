@@ -3,10 +3,12 @@ from dataclasses import dataclass, field
 from typing import Optional, Self
 
 import torch
+from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset
 from torch_geometric.data import Data
 import networkx as nx
-
+import os
+from pathlib import Path
 
 _VAR_MAP_RE = re.compile(r"Let\s+(.*?)\.")
 _VAR_ENTRY_RE = re.compile(r"(\w+)\s*=\s*([^;]+)")
@@ -19,7 +21,7 @@ class CLadderSample:
     variable_keys: list[str] # actual variables in the graph
     prompt: str
     label: str  # yes/no
-    rung: int  # Associational, Interventional, Counterfactual
+    rung: int  # 0=Associational, 1=Interventional, 2=Counterfactual
     query_type: str
     graph_id: int
     story_id: int
@@ -39,13 +41,81 @@ class CLadderSample:
             variable_keys=variable_keys,
             prompt=row["prompt"],
             label=row["label"],
-            rung=int(row["rung"]),
+            rung=int(row["rung"])-1,  # normalize {1,2,3} -> {0,1,2} for F.cross_entropy
             query_type=row["query_type"],
             graph_id=row["graph_id"],
             story_id=row["story_id"],
             sample_id=int(row["id"]),
             formal_form=row.get("formal_form", ""),
         )
+
+
+class CLadderDataset(Dataset[CLadderSample]):
+    """
+    Wraps a list of CLadder Samples for use with torch.utils.data.DataLoader
+    Always has batch_size=1.
+    """
+    def __init__(self, samples: list[CLadderSample]):
+        self.samples = samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> CLadderSample:
+        return self.samples[idx]
+
+    @staticmethod
+    def as_dataloader(batch: list[CLadderSample]) -> CLadderSample:
+        """
+        Unpacks the single-element batch list back to a bare CLadderSample.
+        batch_size=1 enforced by as_dataloader().
+        :param batch: batch to extract from
+        :return: CLadderSample
+        """
+        assert len(batch) == 1, (
+            f"CLadderDataset expects batch_size=1, got {len(batch)}"
+        )
+        return batch[0]
+
+    def as_dataloader(self, shuffle: bool = True) -> DataLoader[CLadderSample]:
+        """
+        Construct a DataLoader with the correct collate function and batch_size=1 enforced.
+        :param shuffle:  Whether to shuffle the dataset each epoch (default True, set False for validation)
+        :return: DataLoader[CLadderSample]
+        """
+        return DataLoader(
+            self,
+            batch_size=1,
+            shuffle=shuffle,
+            collate_fn=self.collate
+        )
+
+    @classmethod
+    def from_samples_split(
+            cls,
+            samples: list[CLadderSample],
+            val_size: float = 0.2,
+            seed: int = 42,
+            stratify: bool = True
+    ) -> tuple[Self, Self]:
+        """
+        Split a list of CLadderSamples into train and validation datasets.
+        Stratification is enabled (to split across rung values).
+        :param samples: Full list of CLadderSample objects to split
+        :param val_size: Fraction of samples to use for validation
+        :param seed: Random seed for reproducibility
+        :param stratify: Whether to stratify by rung (default True).
+        :return: train_dataset, validation_dataset: Two CLadderDataset objects.
+        """
+        from sklearn.model_selection import train_test_split
+        strat_labels = [s.rung for s in samples] if stratify else None
+        train_samples, val_samples = train_test_split(
+            samples,
+            test_size=val_size,
+            random_state=seed,
+            stratify=strat_labels
+        )
+        return cls(train_samples), cls(val_samples)
 
 
 
@@ -166,7 +236,7 @@ def load_cladder_v1_5(
         config = CLadderLoaderConfig()
 
     print("Downloading causal-nlp/CLadder (full_v1.5_default) ...")
-    dataset = load_dataset("causal-nlp/CLadder", split="full_v1.5_default")
+    dataset = load_dataset("causal-nlp/CLadder", split="full_v1.5_default", cache_dir=Path(os.getcwd()) / "hf_datasets")
 
     # Apply rung filter
     if config.rung_filter is not None:
@@ -200,9 +270,3 @@ def load_cladder_v1_5(
         f"Loaded {len(graphs)} graphs, skipped {skipped} unparseable rows."
     )
     return graphs
-
-
-test = load_cladder_v1_5(CLadderLoaderConfig(rung_filter=None, query_types=None, skip_unparseable=True))
-print(test[1])
-
-

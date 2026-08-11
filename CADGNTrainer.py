@@ -1,12 +1,14 @@
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, TypedDict
+from inspect import isdatadescriptor
 
-from cadgn.graph_utils import GraphBatch, _RequiredBatchFields
-#from graph_utils import GraphBatch, _RequiredBatchFields
+#from cadgn.graph_utils import GraphBatch, _RequiredBatchFields
 from dataclasses import dataclass
 from CADGNCore import CADGNCore
 from TokenizerFamily import TokenizerFamily
 from losses import _generate_candidate_pairs, reconstruction_loss, generalized_mmd_loss
+from ds.cladder import CLadderSample, CLadderDataset
+from torch.utils.data import DataLoader
 
 import torch
 import torch.nn as nn
@@ -143,7 +145,7 @@ class CADGNTrainer:
 
     def _stage1_step(
             self,
-            batch: GraphBatch,
+            sample: CLadderSample,
             config: Stage1Config
     ) -> dict[str, torch.Tensor]:
         """
@@ -152,17 +154,13 @@ class CADGNTrainer:
         :param config:
         :return: Flat metrics dict (only 'loss' is gradient-attached)
         """
-        edge_index = batch['edge_index'].to(self.device)
-        node_texts = batch['node_texts']
-        batch_vector = batch.get('batch_vector')
+        edge_index = sample.data.edge_index.to(self.device)
+        node_texts = sample.node_names
 
-        if batch_vector is not None:
-            batch_vector = batch_vector.to(self.device)
 
         # Generate candidate pairs
         candidate_pairs = _generate_candidate_pairs(
             num_nodes=len(node_texts),
-            batch_vector=batch_vector,
             device=self.device,
         )
 
@@ -178,7 +176,7 @@ class CADGNTrainer:
                 node_texts,
                 padding=True,
                 truncation=True,
-                max_length=family.encoder_head.max_length,
+                max_length=family.max_seq_len,
                 return_tensors="pt",
             ).to(self.device)
 
@@ -248,10 +246,10 @@ class CADGNTrainer:
 
     def train_stage1(
             self,
-            *,
+            #*,
             config: Stage1Config,
-            train_dataloader,
-            val_dataloader=None,
+            train_dataloader: DataLoader[CLadderSample],
+            val_dataloader: Optional[DataLoader[CLadderSample]]=None,
             checkpoint_dir: Optional[str | Path] = None,
             checkpoint_every: int = 10,
     ) -> dict[str, list[float]]:
@@ -270,7 +268,7 @@ class CADGNTrainer:
             fam.configure_stage1()
 
         optimizer = self._build_stage1_optimizer(config=config)
-        history = dict[str, list[float]] = {}
+        history: dict[str, list[float]] = {}
 
         for epoch in range(config.epochs):
             # Train
@@ -283,7 +281,7 @@ class CADGNTrainer:
             for batch in train_dataloader:
                 optimizer.zero_grad()
 
-                step = self._stage1_step(batch=batch, config=config)
+                step = self._stage1_step(sample=batch, config=config)
                 step["loss"].backward()
 
                 if config.grad_clip > 0.0:
@@ -328,7 +326,7 @@ class CADGNTrainer:
     @torch.no_grad()
     def _eval_stage1(
             self,
-            val_dataloader,
+            val_dataloader: DataLoader[CLadderSample],
             config: Stage1Config,
     ) -> dict[str, float]:
         """Validation pass, no gradients. Returns per-metric batch averages."""

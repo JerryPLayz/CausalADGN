@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import torch.nn as nn
 from pathlib import Path
 import json
+from typing import Any
 
 
 class Staged(ABC):
@@ -68,6 +69,7 @@ class Staged(ABC):
         """
         ...
 
+    @property
     def trainable_parameters(self) -> Iterable[nn.Parameter]:
         """
         Yield only parameters that currently require gradients.
@@ -78,3 +80,12 @@ class Staged(ABC):
         if hasattr(self, "parameters"):
             return (p for p in self.parameters() if p.requires_grad)
         return tuple()
+
+    def __getitem__(self, item: str):
+        return self.__dict__.get(item, self.__config__.get(item, None))
+
+    @property
+    @abstractmethod
+    def __config__(self) -> dict[str, Any]:
+        ...
+

@@ -13,11 +13,11 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from cadgn import CADGNEncoder, CADGNDecoder, GraphBuilder, ModuleMixin
+from cadgn import CADGNEncoder, CADGNDecoder, GraphBuilder
 from stager import Staged
 
 
-class CADGNCore(nn.Module, Staged, ModuleMixin):
+class CADGNCore(nn.Module, Staged):
     SAVE_LOAD_PREFIX = "CADGNCore"
     def __init__(
             self,
@@ -102,4 +102,8 @@ class CADGNCore(nn.Module, Staged, ModuleMixin):
         self.encoder.requires_grad_(False)
         self.decoder.requires_grad_(False)
         self.graph_builder.requires_grad_(False)
+
+    @property
+    def __config__(self) -> dict[str, Any]:
+        return self._config
 

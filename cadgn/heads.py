@@ -79,7 +79,8 @@ class EncoderHead(nn.Module):
         :param attention_mask: (num_nodes, seq_len) LongTensor or BoolTensor. 1/True for real tokens, 0 / False for padding. Matches attention_mask produced by HuggingFace tokenizers directly.
         :return: H (num_nodes, ca_dgn_dim) Float Tensor of embeddings
         """
-        N,S = embeds.shape
+        print(embeds.shape)
+        N,S, llm_dim = embeds.shape
         device = embeds.device
 
         # Project to CA-DGN Dim

@@ -8,12 +8,12 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import TokenizersBackend, SentencePieceBackend
 
-from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, ModuleMixin
+from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier
 
 from stager import Staged
 
 
-class TokenizerFamily(nn.Module, Staged, ModuleMixin):
+class TokenizerFamily(nn.Module, Staged):
     """
     Container for all components specific to one LLM tokenizer family.
     This is not a pipeline object, simply a structure to make checkpointing simple.
@@ -53,6 +53,8 @@ class TokenizerFamily(nn.Module, Staged, ModuleMixin):
         self.pre_projector = pre_projector
         self.post_projector = post_projector
         self.gate_classifier = gate_classifier
+
+        self.max_seq_len = max_seq_len
 
         # Stored verbatim
         self._config = {
@@ -115,7 +117,7 @@ class TokenizerFamily(nn.Module, Staged, ModuleMixin):
         # Extract Embedding Layer from LLM
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             low_cpu_mem_usage=True
         )
 
@@ -323,6 +325,10 @@ class TokenizerFamily(nn.Module, Staged, ModuleMixin):
         self.pre_projector.requires_grad_(True)
         self.post_projector.requires_grad_(True)
         self.gate_classifier.requires_grad_(True)
+
+    @property
+    def __config__(self) -> dict[str, Any]:
+        return self._config
 
 
 

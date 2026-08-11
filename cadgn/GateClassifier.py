@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+# Note: ensure that the output is properly softmax'd. Output classes: 0-2
 class GateClassifier(nn.Module):
     """
     Purpose is to act as a diagnostic tool of the LLM's prefill state: can the LLM appropriately determine the task it is being asked to do?

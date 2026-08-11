@@ -5,7 +5,6 @@ from .GraphBuilder import GraphBuilder
 from .heads import EncoderHead, DecoderHead
 from .projectors import Projector
 from .RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighborhoodAggregation as RoPE_DNA
-from .ModuleMixin import ModuleMixin
 from .graph_utils import *
 
 __all__ = [
@@ -18,7 +17,6 @@ __all__ = [
     "DecoderHead",
     "Projector",
     "RoPE_DNA",
-    "ModuleMixin",
     "graph_utils"
 ]
 

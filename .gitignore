@@ -1,4 +1,6 @@
 /.venv/
+/hf/
+/cp/
 # Profile Inspections are not needed
 #.idea/inspectionProfiles/*
 
