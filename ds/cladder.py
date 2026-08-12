@@ -1,14 +1,15 @@
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Self
+from typing import Optional, Self, Set
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 from datasets import load_dataset
 from torch_geometric.data import Data
 import networkx as nx
 import os
 from pathlib import Path
+from .cyclic_subset_sampler import CyclicSubsetSampler
 
 _VAR_MAP_RE = re.compile(r"Let\s+(.*?)\.")
 _VAR_ENTRY_RE = re.compile(r"(\w+)\s*=\s*([^;]+)")
@@ -18,7 +19,7 @@ _EDGE_RE = re.compile(r"(\w+)->(\w+)")
 class CLadderSample:
     data: Data
     node_names: list[str]  # semantic discription of nodes
-    variable_keys: list[str] # actual variables in the graph
+    variable_keys: list[str]  # actual variables in the graph
     prompt: str
     label: str  # yes/no
     rung: int  # 0=Associational, 1=Interventional, 2=Counterfactual
@@ -65,7 +66,7 @@ class CLadderDataset(Dataset[CLadderSample]):
         return self.samples[idx]
 
     @staticmethod
-    def as_dataloader(batch: list[CLadderSample]) -> CLadderSample:
+    def obs__as_dataloader(batch: list[CLadderSample]) -> CLadderSample:
         """
         Unpacks the single-element batch list back to a bare CLadderSample.
         batch_size=1 enforced by as_dataloader().
@@ -77,18 +78,41 @@ class CLadderDataset(Dataset[CLadderSample]):
         )
         return batch[0]
 
-    def as_dataloader(self, shuffle: bool = True) -> DataLoader[CLadderSample]:
+    def as_dataloader(
+            self,
+            shuffle: bool = True,
+            max_steps_per_epoch: Optional[int] = None,
+            seed: int = 42,
+    ) -> DataLoader[CLadderSample]:
         """
         Construct a DataLoader with the correct collate function and batch_size=1 enforced.
         :param shuffle:  Whether to shuffle the dataset each epoch (default True, set False for validation)
+        :param max_steps_per_epoch: When set, uses CyclicSubsetSampler to guarantee full dataset coverage across epochs. When None, uses a standard shuffle behavior.
+        :param seed: Random seed for reproducibility when using CyclicSubsetSampler (default 42)
         :return: DataLoader[CLadderSample]
         """
+        if max_steps_per_epoch is not None and shuffle:
+            sampler = CyclicSubsetSampler(
+                dataset_size=len(self),
+                max_steps=max_steps_per_epoch,
+                seed=seed
+            )
+        elif max_steps_per_epoch is not None and not shuffle:
+            sampler = RandomSampler(
+                self,
+                num_samples=max_steps_per_epoch,
+                generator=torch.Generator().manual_seed(seed),
+            )
+        else:
+            sampler = None
         return DataLoader(
             self,
             batch_size=1,
-            shuffle=shuffle,
-            collate_fn=self.collate
+            sampler=sampler,
+            shuffle=shuffle if sampler is None else False,
+            collate_fn=lambda batch: batch[0],
         )
+
 
     @classmethod
     def from_samples_split(
@@ -221,7 +245,7 @@ class CLadderLoaderConfig:
     skip_unparseable: If True (default), silently drop rows whose reasoning fields cannot be parsed into a valid graph. If False, raises on failure.
     """
     rung_filter: Optional[int] = 3
-    query_types: Optional[set[str]] = field(default_factory=lambda: RUNG3_QUERY_TYPES)
+    query_types: Optional[Set] = field(default_factory=lambda: RUNG3_QUERY_TYPES)
     skip_unparseable: bool = True
 
 def load_cladder_v1_5(

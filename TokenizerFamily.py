@@ -1,16 +1,23 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Optional, Iterable
+from typing import Optional, Iterable, Literal, Any
+import re
 
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import TokenizersBackend, SentencePieceBackend
 
-from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier
+from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, short_id
 
 from stager import Staged
+
+_DTYPE_MAP = {
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "float32": torch.float32,
+}
 
 
 class TokenizerFamily(nn.Module, Staged):
@@ -39,6 +46,7 @@ class TokenizerFamily(nn.Module, Staged):
             projector_dropout: float = 0.1,
             gate_cls_scale: int = 8,
             gate_cls_dropout: float = 0.1,
+            llm_dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
 
@@ -55,6 +63,8 @@ class TokenizerFamily(nn.Module, Staged):
         self.gate_classifier = gate_classifier
 
         self.max_seq_len = max_seq_len
+        # Short model_id : sh_id
+        self.sh_id = short_id(self.model_id, length=5)
 
         # Stored verbatim
         self._config = {
@@ -71,6 +81,10 @@ class TokenizerFamily(nn.Module, Staged):
             "padding_idx": embed_layer.padding_idx,
             "gate_cls_scale": gate_cls_scale,
             "gate_cls_dropout": gate_cls_dropout,
+            # LLM dtype
+            "llm_dtype": str(llm_dtype).replace("torch.", ""),
+            "pre_projector_dtype": str(llm_dtype).replace("torch.", ""),
+            "post_projector_dtype": "float32",
 
         }
 
@@ -126,6 +140,7 @@ class TokenizerFamily(nn.Module, Staged):
         embed_layer = embed_layer.to(device)
 
         llm_dim = embed_layer.weight.shape[1]
+        llm_dtype = embed_layer.weight.dtype
 
         # Discord the rest of the model
         del model
@@ -152,6 +167,7 @@ class TokenizerFamily(nn.Module, Staged):
             d_to=llm_dim,
             expansion=projector_expansion,
             dropout=projector_dropout,
+            output_dtype=llm_dtype
         ).to(device)
 
         post_projector = Projector(
@@ -159,6 +175,7 @@ class TokenizerFamily(nn.Module, Staged):
             d_to=ca_dgn_dim,
             expansion=projector_expansion,
             dropout=projector_dropout,
+            output_dtype=torch.float32
         ).to(device)
 
         gate_classifier = GateClassifier(
@@ -185,6 +202,7 @@ class TokenizerFamily(nn.Module, Staged):
             projector_dropout=projector_dropout,
             gate_cls_scale=gate_cls_scale,
             gate_cls_dropout=gate_cls_dropout,
+            llm_dtype=llm_dtype,
         )
 
     # Persistence on Disk (save/load)
@@ -210,10 +228,10 @@ class TokenizerFamily(nn.Module, Staged):
 
         path = Path(path)
 
-        with open(path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_config.json", "r") as f:
+        with open(path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_config.json", "r") as f:
             config = json.load(f)
 
-        tokenizer = AutoTokenizer.from_pretrained(path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_tokenizer")
+        tokenizer = AutoTokenizer.from_pretrained(path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_tokenizer")
 
         # Reconstruct modules from config dimensions
         embed_layer = nn.Embedding(
@@ -242,6 +260,7 @@ class TokenizerFamily(nn.Module, Staged):
             d_to=config["llm_dim"],
             expansion=config["projector_expansion"],
             dropout=config["projector_dropout"],
+            output_dtype=_DTYPE_MAP.get(config["pre_projector_dtype"], torch.bfloat16)
         )
 
         post_projector = Projector(
@@ -249,6 +268,7 @@ class TokenizerFamily(nn.Module, Staged):
             d_to=config["ca_dgn_dim"],
             expansion=config["projector_expansion"],
             dropout=config["projector_dropout"],
+            output_dtype=_DTYPE_MAP.get(config["post_projector_dtype"], torch.bfloat16)
         )
 
         gate_classifier = GateClassifier(
@@ -279,7 +299,7 @@ class TokenizerFamily(nn.Module, Staged):
         )
 
         state = torch.load(
-            path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_weights.pt",
+            path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_weights.pt",
             map_location=map_location,
             weights_only=True
         )

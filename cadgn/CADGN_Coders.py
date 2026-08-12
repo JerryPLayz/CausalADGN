@@ -79,8 +79,11 @@ class CADGNEncoder(nn.Module):
         num_layers = max(num_layers, 1)
 
         # Shared Convolution applied num_layer times
+
         for layer_idx in range(num_layers):
-            x = self.conv(x, edge_index, layer=layer_idx + 1)
+            #print(f"L[{layer_idx}] - {x.shape}")
+            x = self.conv(x=x, edge_index=edge_index, layer=layer_idx + 1)
+            #print(f"  - Pre Dropout: {x.shape}")
             x = self.dropout(x)
 
         return self.norm(x)

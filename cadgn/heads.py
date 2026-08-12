@@ -31,6 +31,7 @@ class EncoderHead(nn.Module):
         super().__init__()
         self.ca_dgn_dim = ca_dgn_dim
         self.max_seq_len = max_seq_len
+        self.llm_dim = llm_dim
 
         # Where the dimensions of the llm do not match the CA-DGN, we project them.
         self.input_proj = (
@@ -79,8 +80,13 @@ class EncoderHead(nn.Module):
         :param attention_mask: (num_nodes, seq_len) LongTensor or BoolTensor. 1/True for real tokens, 0 / False for padding. Matches attention_mask produced by HuggingFace tokenizers directly.
         :return: H (num_nodes, ca_dgn_dim) Float Tensor of embeddings
         """
-        print(embeds.shape)
-        N,S, llm_dim = embeds.shape
+        # Cast to match module dtype
+        embeds = embeds.to(next(self.parameters()).dtype)
+
+        #print(embeds.shape)
+        N, S, llm_dim = embeds.shape
+        assert llm_dim == self.llm_dim
+
         device = embeds.device
 
         # Project to CA-DGN Dim

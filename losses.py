@@ -1,6 +1,6 @@
 from __future__ import annotations
 from itertools import combinations
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 
 import torch
 import torch.nn as nn
@@ -313,7 +313,7 @@ def embedding_norm_loss(
         Z: torch.Tensor,
         H: torch.Tensor,
         epsilon: float = 1e-8,
-        w_preserve: flaot = 1.0,
+        w_preserve: float = 1.0,
         w_floor: float = 1.0
 ) -> torch.Tensor:
     """

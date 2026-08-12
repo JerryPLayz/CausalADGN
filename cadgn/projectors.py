@@ -11,11 +11,13 @@ class Projector(nn.Module):
             d_to: int,
             expansion: int = 2,
             dropout: float = 0.1,
+            output_dtype: Optional[torch.dtype] = None
     ) -> None:
         super().__init__()
         self.d_from = d_from
         self.d_to = d_to
         self.expansion = expansion
+        self.output_dtype = output_dtype
 
         d_hidden = max(d_from, d_to) * expansion
 
@@ -37,7 +39,11 @@ class Projector(nn.Module):
                     nn.init.zeros_(module.bias)
 
     def forward(self, Z: torch.Tensor) -> torch.Tensor:
-        return self.proj(Z)
+        Z = Z.to(next(self.parameters()).dtype)
+        out = self.proj(Z)
+        if self.output_dtype is not None:
+            out = out.to(self.output_dtype)
+        return out
 
 
 

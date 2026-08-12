@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <module type="PYTHON_MODULE" version="4">
   <component name="NewModuleRootManager">
+    <content url="file:////wsl.localhost/Ubuntu/home/jerry/venvs/CausalADGN_venv/venv">
+      <sourceFolder url="file:////wsl.localhost/Ubuntu/home/jerry/venvs/CausalADGN_venv/venv/bin" isTestSource="false" />
+      <sourceFolder url="file:////wsl.localhost/Ubuntu/home/jerry/venvs/CausalADGN_venv/venv/lib/python3.11/site-packages" isTestSource="false" />
+    </content>
+    <content url="file:////wsl.localhost/Ubuntu/usr/lib/python3.11">
+      <sourceFolder url="file:////wsl.localhost/Ubuntu/usr/lib/python3.11" isTestSource="false" />
+    </content>
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/.venv" />
+    </content>
     <orderEntry type="jdk" jdkName="WSL (Ubuntu): (/home/jerry/venvs/CausalADGN_venv/venv/bin/python3.11)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>

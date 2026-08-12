@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 
 import torch
 import torch.nn as nn
+from cadgn import Profiler
 
 
 @dataclass
@@ -52,6 +53,11 @@ class Stage1Config:
     auto_pos_weight: bool = True
     reduction: str = 'mean'
 
+    # Dataset sampling & Gradient Accumulation
+    max_steps_per_epoch: Optional[int] = None  # full dataset per epoch; limit to cutoff samples after a point (due to CyclicSubsetSampler, we guarantee all samples will be seen across epochs)
+    grad_accum_steps: int = 1  # 1 = batch-size of 1, (simulate larger batch-sizes for efficiency by calling `optimizer.step` on many independent samples at once.)
+    max_steps_per_epoch_val: Optional[int] = None  # validation (same as above, but for validation set)
+
 
 @dataclass
 class Stage2Config:
@@ -79,10 +85,16 @@ class CADGNTrainer:
             core: CADGNCore,
             families: Iterable[TokenizerFamily],
             device: str | torch.device = "cuda",
+            profile: bool = False,
+            profile_sync: bool = True,
     ):
         self.device = torch.device(device) if isinstance(device, str) else device
         self.core: CADGNCore = core.to(device)
         self.families = list(families)
+        self.profiler = Profiler(
+            sync_cuda=profile_sync,
+            enabled=profile
+        )
         for fam in self.families:
             fam.to(device)
 
@@ -92,7 +104,7 @@ class CADGNTrainer:
             checkpoint_dir: str | Path,
             epoch: int
     ) -> None:
-        f"""
+        """
         Save core and all families under a shared epoch directory
         Layout:
             {checkpoint_dir}/epoch_{epoch:04d}/
@@ -157,70 +169,82 @@ class CADGNTrainer:
         edge_index = sample.data.edge_index.to(self.device)
         node_texts = sample.node_names
 
-
         # Generate candidate pairs
-        candidate_pairs = _generate_candidate_pairs(
-            num_nodes=len(node_texts),
-            device=self.device,
-        )
+        with self.profiler.section("S1 // 1-candidate_pairs"):
+            candidate_pairs = _generate_candidate_pairs(
+                num_nodes=len(node_texts),
+                device=self.device,
+            )
 
         H_dict: dict[str, torch.Tensor] = {}
         total_loss = torch.tensor(0.0, device=self.device)
         metrics: dict[str, torch.Tensor] = {}
-
+        #print(f"[ID={sample.sample_id:06} : N={len(node_texts):06}]")
         for family in self.families:
             name = family.model_id
-
             # Tokenize
-            tokens = family.tokenizer(
-                node_texts,
-                padding=True,
-                truncation=True,
-                max_length=family.max_seq_len,
-                return_tensors="pt",
-            ).to(self.device)
+            with self.profiler.section(f"S1 // 2-{family.sh_id}-tokenizer"):
+                tokens = family.tokenizer(
+                    node_texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=family.max_seq_len,
+                    return_tensors="pt",
+                ).to(self.device)
+
+            #print(f"Token Shapes: {tokens.input_ids.shape}")
 
             # Embeddings
-            with torch.no_grad():
-                embeds = family.embed_layer(tokens.input_ids)
+            with self.profiler.section(f"S1 // 3-{family.sh_id}-embed_layer"):
+                with torch.no_grad():
+                    embeds = family.embed_layer(tokens.input_ids)
             # (num_nodes, seq_len, llm_dim)
 
+            #print(f"Pre-Encoder Head: {embeds.shape}")
             # Encoder Head -> H
-            H = family.encoder_head(embeds, tokens.attention_mask)
+            with self.profiler.section(f"S1 // 4-{family.sh_id}-enc_head"):
+                H = family.encoder_head(embeds, tokens.attention_mask)
             H_dict[name] = H
 
+            #print(f"Pre-CADGN Enc: {H.shape}")
+
             # CADGN-Encoder -> Z
-            Z = self.core.encoder(H, edge_index)
+            with self.profiler.section(f"S1 // 5-core-cadgn_encoder"):
+                Z = self.core.encoder(H, edge_index)
 
             # CADGN_Decoder -> Z_dec
-            Z_dec = self.core.decoder(Z)
+            with self.profiler.section(f"S1 // 6-core-cadgn_decoder"):
+                Z_dec = self.core.decoder(Z)
 
             # DecoderHead -> pred_embeds
-            pred_embeds = family.decoder_head(Z_dec, tokens.attention_mask)
+            with self.profiler.section(f"S1 // 7-{family.sh_id}-dec_head"):
+                pred_embeds = family.decoder_head(Z_dec, tokens.attention_mask)
 
             # Graph Builder -> edge_logits
-            edge_logits = self.core.graph_builder(Z, candidate_pairs)
+            with self.profiler.section(f"S1 // 8-{family.sh_id}-gbuild"):
+                edge_logits = self.core.graph_builder(Z, candidate_pairs)
 
-            fam_losses = reconstruction_loss(
-                pred_embeds = pred_embeds,
-                true_node_embeds = embeds,
-                node_attention_mask = tokens.attention_mask,
-                edge_logits=edge_logits,
-                candidate_pairs=candidate_pairs,
-                true_edge_index=edge_index,
-                Z=Z,
-                H=H,
+            with self.profiler.section(f"S1 // 9-{family.sh_id}-reconloss"):
+                fam_losses = reconstruction_loss(
+                    pred_node_embeds = pred_embeds,
+                    true_node_embeds = embeds,
+                    node_attention_mask = tokens.attention_mask,
+                    edge_logits=edge_logits,
+                    candidate_pairs=candidate_pairs,
+                    true_edge_index=edge_index,
+                    Z=Z,
+                    H=H,
 
-                w_nodes=config.w_nodes,
-                w_edges=config.w_edges,
-                w_norm=config.w_norm,
-                nodes_w_mse=config.w_mse,
-                nodes_w_cosine=config.w_cosine,
-                auto_pos_weight=config.auto_pos_weight,
-                norm_w_preserve=config.norm_w_preserve,
-                norm_w_floor=config.norm_w_floor,
-                reduction='mean'
-            )
+                    w_nodes=config.w_nodes,
+                    w_edges=config.w_edges,
+                    w_norm=config.w_norm,
+                    nodes_w_mse=config.w_mse,
+                    nodes_w_cosine=config.w_cosine,
+                    auto_pos_weight=config.auto_pos_weight,
+                    norm_w_preserve=config.norm_w_preserve,
+                    norm_w_floor=config.norm_w_floor,
+                    reduction='mean'
+                )
 
             total_loss += fam_losses['loss']
             metrics[f"{name}/L_nodes"] = fam_losses['L_nodes']
@@ -230,11 +254,12 @@ class CADGNTrainer:
         # EOL
 
         # MMD loss across all k-family H tensors (must be done at this scope)
-        L_mmd = generalized_mmd_loss(
-            H_dict=H_dict,
-            kernel=config.mmd_kernel,
-            beta=config.mmd_beta,
-        )
+        with self.profiler.section(f"S1 // 10-mmd_loss"):
+            L_mmd = generalized_mmd_loss(
+                Z_dict=H_dict,
+                kernel=config.mmd_kernel,
+                beta=config.mmd_beta,
+            )
 
         total_loss = total_loss + config.w_mmd * L_mmd
 
@@ -246,7 +271,7 @@ class CADGNTrainer:
 
     def train_stage1(
             self,
-            #*,
+            # *,
             config: Stage1Config,
             train_dataloader: DataLoader[CLadderSample],
             val_dataloader: Optional[DataLoader[CLadderSample]]=None,
@@ -269,36 +294,48 @@ class CADGNTrainer:
 
         optimizer = self._build_stage1_optimizer(config=config)
         history: dict[str, list[float]] = {}
+        print("Training Stage 1 for:")
+        print(f"\tCore: {self.core}")
+        print(f"\tFamilies: {[f.model_id for f in self.families]}")
 
         for epoch in range(config.epochs):
+            # with self.profiler.section(f"S1 // 0-Epoch-Summary"):
             # Train
             self.core.train()
             for fam in self.families:
                 fam.train()
 
             epoch_metrics: dict[str, list[float]] = {}
+            optimizer.zero_grad()
+            with self.profiler.section("S1 // Epoch"):
+                for step_idx, sample in enumerate(train_dataloader):
+                    with self.profiler.section(f"S1 // 00 - Step"):
+                        step = self._stage1_step(sample=sample, config=config)
+                    loss = step["loss"] / config.grad_accum_steps
+                    loss.backward()
 
-            for batch in train_dataloader:
-                optimizer.zero_grad()
-
-                step = self._stage1_step(sample=batch, config=config)
-                step["loss"].backward()
-
-                if config.grad_clip > 0.0:
-                    nn.utils.clip_grad_norm_(
-                        [
-                            p for src in [self.core, *self.families]
-                            for p in src.parameters()
-                            if p.requires_grad
-                        ],
-                        config.grad_clip
+                    is_accum_step = (step_idx + 1) % config.grad_accum_steps == 0
+                    is_last_step = (
+                        config.max_steps_per_epoch is not None
+                        and step_idx + 1 >= config.max_steps_per_epoch
                     )
-                optimizer.step()
-
-                for k,v in step.items():
-                    epoch_metrics.setdefault(k, []).append(
-                        v.item() if isinstance(v, torch.Tensor) else v
-                    )
+                    # simulate larger batch sizes to promote greater stability during training
+                    if is_accum_step or is_last_step:
+                        if config.grad_clip > 0.0:
+                            nn.utils.clip_grad_norm_(
+                                [
+                                    p for src in [self.core, *self.families]
+                                    for p in src.parameters()
+                                    if p.requires_grad
+                                ],
+                                config.grad_clip
+                            )
+                        optimizer.step()
+                        optimizer.zero_grad()
+                    for k,v in step.items():
+                        epoch_metrics.setdefault(k, []).append(
+                            v.item() if isinstance(v, torch.Tensor) else v
+                        )
 
             # Epoch averages over all batches
             epoch_avg = {
@@ -307,7 +344,8 @@ class CADGNTrainer:
             }
             # Validate
             if val_dataloader is not None:
-                val_avg = self._eval_stage1(val_dataloader=val_dataloader, config=config)
+                with self.profiler.section("S1 // Epoch (Vald)"):
+                    val_avg = self._eval_stage1(val_dataloader=val_dataloader, config=config)
                 for k,v in val_avg.items():
                     epoch_avg[f"val/{k}"] = v
 
@@ -320,6 +358,29 @@ class CADGNTrainer:
                 and (epoch+1) % checkpoint_every == 0
             ):
                 self._save_checkpoint(checkpoint_dir=checkpoint_dir, epoch=epoch+1)
+
+            train_loss = epoch_avg.get("loss", float("nan"))
+            val_loss = epoch_avg.get("val/loss", float("nan"))
+            print(
+                f"Epoch {epoch:>4d} | "
+                f"Train loss: {train_loss:.5f} | "
+                f"Vald  loss: {val_loss:.5f}",
+                end=""
+            )
+            if self.profiler.enabled:
+                elapsed_t = self.profiler.get_latest_n('S1 // Epoch')
+                elapsed_v = self.profiler.get_latest_n('S1 // Epoch (Vald)')
+                tot_elapsed = elapsed_t + elapsed_v
+                print(
+                    f" | Elapsed: {tot_elapsed:.3f}s (t:{elapsed_t:.2f} + v:{elapsed_v:.2f}) "
+                )
+
+            else:
+                print(f"")
+        # end of epochs...
+        if self.profiler.enabled:
+            print(f"Profiler Summary:")
+            print(self.profiler.summary(sort_by="total"))
 
         return history
 
@@ -337,7 +398,7 @@ class CADGNTrainer:
         all_metrics: dict[str, list[float]] = {}
 
         for batch in val_dataloader:
-            step = self._stage1_step(batch=batch, config=config)
+            step = self._stage1_step(sample=batch, config=config)
             for k,v in step.items():
                 all_metrics.setdefault(k, []).append(
                     v.item() if isinstance(v, torch.Tensor) else v

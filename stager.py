@@ -1,9 +1,10 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 import torch.nn as nn
+import torch
 from pathlib import Path
 import json
-from typing import Any
+from typing import Any, Iterable, Optional
 
 
 class Staged(ABC):
@@ -35,7 +36,7 @@ class Staged(ABC):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         with open(path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_config.json", "w") as f:
-            json.dump(self._config, f, indent=2)
+            json.dump(self.__config__, f, indent=2)
         self._save_extra(path, model_id, *args, **kwargs)
         torch.save(self.state_dict(), path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_weights.pt")
 

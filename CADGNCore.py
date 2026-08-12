@@ -8,7 +8,7 @@ All three modules are the shared core of CADGN across all LLM families.
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union, Any
 
 import torch
 import torch.nn as nn
@@ -86,10 +86,10 @@ class CADGNCore(nn.Module, Staged):
             map_location: Optional[str | torch.device] = None,
     ):
         path = Path(path)
-        with open(path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_config.json") as f:
+        with open(path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_config.json") as f:
             config = json.load(f)
         model = cls(**config)
-        state = torch.load(path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_weights.pt", map_location=map_location, weights_only=True)
+        state = torch.load(path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_weights.pt", map_location=map_location, weights_only=True)
         model.load_state_dict(state)
         return model
 

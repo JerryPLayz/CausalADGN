@@ -1,6 +1,8 @@
 /.venv/
 /hf/
 /cp/
+/hf_datasets/
+/saves/
 # Profile Inspections are not needed
 #.idea/inspectionProfiles/*
 

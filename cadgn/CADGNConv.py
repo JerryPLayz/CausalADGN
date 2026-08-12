@@ -28,7 +28,7 @@ class CADGNConv(nn.Module):
             epsilon: float = 0.1,
             base_gamma: float = 0.1,
             act: Union[str, Callable, None] = 'tanh',
-            act_kwargs: Optional[Dict[str, Any]] = None,
+            act_kwargs: Optional[Dict] = None,
             bias: bool = True
     ):
         super(CADGNConv, self).__init__()
@@ -83,7 +83,6 @@ class CADGNConv(nn.Module):
         # Skew-symmetric Weight Matrix
         W_asym = self.W - self.W.t() - gamma * self.eye
 
-
         # Directed RoPE Neighbourhood Aggregation
         phi_out = self.phi(x, edge_index, layer)
 
@@ -99,6 +98,7 @@ class CADGNConv(nn.Module):
             if self.act is not None:
                 h = self.act(h)
             x = x + self.epsilon * h
+        return x
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}('
