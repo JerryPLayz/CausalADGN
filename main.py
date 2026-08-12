@@ -2,6 +2,8 @@ import env
 from CADGNTrainer import CADGNTrainer, Stage1Config, Stage2Config
 from CADGNCore import CADGNCore
 from TokenizerFamily import TokenizerFamily
+from graph_visualizer import visualize_graph_diff
+from losses import _generate_candidate_pairs
 from models_config import models
 from ds.cladder import CLadderDataset, CLadderSample, load_cladder_v1_5, CLadderLoaderConfig
 from cadgn import save_history
@@ -79,5 +81,19 @@ for fam in families:
 
 with open(f"./profiling.txt", "w") as f:
     f.write(trainer.profiler.summary())
+
+test_sample = vald[0]
+metrics, pred_embeds, edge_logits = trainer._stage1_step(sample=test_sample, config=s1c)
+model_id = families[0].model_id
+fig = visualize_graph_diff(
+    sample=test_sample,
+    edge_logits=edge_logits[model_id],
+    candidate_pairs=_generate_candidate_pairs(
+        num_nodes=len(test_sample.node_names),
+        device=trainer.device,
+    )
+)
+
+fig.savefig(f"graph_diff_{test_sample.sample_id}.png", dpi=150)
 
 print("DONE!")

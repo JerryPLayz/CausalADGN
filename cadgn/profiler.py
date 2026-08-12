@@ -3,6 +3,8 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from typing import Generator, Literal
+import numpy as np
+from scipy.stats import iqr, quantile
 
 import torch
 
@@ -71,6 +73,9 @@ class Profiler:
                 "std": statistics.stdev(times) if n > 1 else 0.0,
                 "min": min(times),
                 "max": max(times),
+                "q1": quantile(times, 0.25),
+                "q3": quantile(times, 0.75),
+                "iqr": iqr(times),
                 "total": sum(times),
                 "n": n
             }
@@ -78,10 +83,10 @@ class Profiler:
 
     def summary(
             self,
-            sort_by: Literal["mean", "total", "max", "min"] = "mean"):
+            sort_by: Literal["mean", "total", "max", "min", "iqr", "q1", "q3"] = "mean"):
         """
         Human-Readable Summary Table, sorted by a stat key, `sort_by`.
-        :param sort_by: One of "mean", "total", "max", "min"
+        :param sort_by: One of "mean", "total", "max", "min", "iqr", "q1", "q3"
         :return: Formatted string of the summary statistics.
         """
         s = self.stats()
@@ -96,8 +101,8 @@ class Profiler:
 
         lines = [
             f"{'Section':<30} {'Mean':>9} {'Std':>9} "
-            f"{'Min':>9} {'Max':>9} {'Total':>10} {'N':>6}",
-            "-"*85
+            f"{'Min':>9} {'Max':>9} {'Q1':>9} {'Q3':>9} {'IQR':>9} {'Total':>10} {'N':>6}",
+            "-"*115
         ]
         for name, d in rows:
             lines.append(
@@ -106,6 +111,9 @@ class Profiler:
                 f"{d['std']*1000:>8.2f}ms "
                 f"{d['min']*1000:>8.2f}ms "
                 f"{d['max']*1000:>8.2f}ms "
+                f"{d['q1']*1000:>8.2f}ms "
+                f"{d['q3']*1000:>8.2f}ms "
+                f"{d['iqr']*1000:>8.2f}ms "
                 f"{d['total']:>8.2f}s "
                 f"{d['n']:>6d}"
             )
