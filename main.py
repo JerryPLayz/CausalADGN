@@ -77,4 +77,7 @@ for fam in families:
     safe_name = fam.model_id.replace("/", "_")
     fam.save(path=f"./saves/families", model_id=f"{safe_name}-test")
 
+with open(f"./profiling.txt", "w") as f:
+    f.write(trainer.profiler.summary())
+
 print("DONE!")

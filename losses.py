@@ -423,6 +423,3 @@ def reconstruction_loss(
     }
 
 
-# todo: rewrite node reconstruction loss now that we are using the token embeddings, not token ids....
-
-
