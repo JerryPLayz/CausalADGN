@@ -4,6 +4,11 @@
 /hf_datasets/
 /saves/
 /search_results/
+
+# Remove .env
+.env
+*.env
+.env.*
 # Profile Inspections are not needed
 #.idea/inspectionProfiles/*
 

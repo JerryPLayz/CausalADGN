@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+from dotenv import load_dotenv
 
 # Set cache folders
 base = Path.cwd() / "hf"
@@ -21,3 +22,17 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 SAVES_DIR = Path.cwd() / "saves"  # to save the parts of the full pipeline
 SAVES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+load_dotenv(Path(__file__).parent / ".env")
+_required = ["HF_TOKEN"]
+_missing  = [k for k in _required if not os.getenv(k)]
+
+if _missing:
+    raise EnvironmentError(
+        f"Missing required environment variables: {_missing}\n"
+        f"Add them to your .env file."
+    )
+
+HF_TOKEN = os.getenv("HF_TOKEN")
+

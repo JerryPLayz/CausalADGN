@@ -18,7 +18,7 @@ from CADGNTrainer import CADGNTrainer, Stage1Config
 from CADGNCore import CADGNCore
 from TokenizerFamily import TokenizerFamily
 from ds.cladder import CLadderDataset
-from cadgn import save_history
+from cadgn import save_history, flush_gpu
 
 
 
@@ -63,12 +63,12 @@ class ArchParams:
     head_decoder_dropout: float = 0.1
 
     # Projectors
-    projector_expansion: int = 2
-    projector_dropout: float = 0.1
+    #projector_expansion: int = 2
+    #projector_dropout: float = 0.1
 
     # Gate Classifier
-    gate_cls_scale: int = 8,
-    gate_cls_dropout: float = 0.1,
+    #gate_cls_scale: int = 8,
+    #gate_cls_dropout: float = 0.1,
 
     def core_kwargs(self) -> dict:
         """
@@ -95,10 +95,10 @@ class ArchParams:
             "ca_dgn_dim": self.ca_dgn_dim,
             "encoder_dropout": self.head_encoder_dropout,
             "decoder_dropout": self.head_decoder_dropout,
-            "projector_expansion": self.projector_expansion,
-            "projector_dropout": self.projector_dropout,
-            "gate_cls_scale": self.gate_cls_scale,
-            "gate_cls_dropout": self.gate_cls_dropout,
+            #"projector_expansion": self.projector_expansion,
+            #"projector_dropout": self.projector_dropout,
+            #"gate_cls_scale": self.gate_cls_scale,
+            #"gate_cls_dropout": self.gate_cls_dropout,
 
         }
 
@@ -194,15 +194,15 @@ class Stage1Search:
             head_decoder_dropout=trial.suggest_float("head_decoder_dropout", 0.05, 0.3),
 
             # Projectors (TokenizerFamily)
-            projector_expansion=trial.suggest_int("projector_expansion", 2, 8),
-            projector_dropout=trial.suggest_float("projector_dropout", 0.05, 0.3),
+            #projector_expansion=trial.suggest_int("projector_expansion", 2, 8),
+            #projector_dropout=trial.suggest_float("projector_dropout", 0.05, 0.3),
 
             # GateClassifier
-            gate_cls_scale=trial.suggest_categorical(
-                "gate_cls_scale",
-                [2, 4, 8, 16]
-            ),
-            gate_cls_dropout=trial.suggest_float("gate_cls_dropout", 0.05, 0.3),
+            #gate_cls_scale=trial.suggest_categorical(
+            #    "gate_cls_scale",
+            #    [2, 4, 8, 16]
+            #),
+            #gate_cls_dropout=trial.suggest_float("gate_cls_dropout", 0.05, 0.3),
         )
 
     # noinspection bad-argument-type
@@ -298,8 +298,7 @@ class Stage1Search:
         finally:
             # Clean up
             del trainer, core, families
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            flush_gpu()
 
         val_losses = history.get("val/loss", [])
         # noinspection bad-assignment

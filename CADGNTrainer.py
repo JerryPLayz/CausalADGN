@@ -465,22 +465,4 @@ class CADGNTrainer:
                 )
         return {k: sum(v) / len(v) for k, v in all_metrics.items()}
 
-    def _inference_stage1(
-            self,
-            sample:CLadderSample,
-            config,
-            family: TokenizerFamily,
-            figure: bool = True
-    ) -> dict[str, Any]:
-        # todo: redo: this isn't correct.
-        metrics, pred_embeds, edge_logits = self._stage1_step(sample=sample, config=config)
-        model_id = family.model_id
-        fig = visualize_graph_diff(
-            sample=sample,
-            edge_logits=edge_logits[model_id],
-            candidate_pairs=_generate_candidate_pairs(
-                num_nodes=len(sample.node_names),
-                device=config.device,
-            )
-        )
-        return {"figure":fig}
+    

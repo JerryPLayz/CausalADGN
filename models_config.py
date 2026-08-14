@@ -60,11 +60,13 @@ models = {
 
     },
 
+    # Llama-3.1
     "meta-llama/Llama-3.1-8B": {
         "ctx_len": 128000,
         "attn_q": 0,
         "attn_kv": 0,
         "dtype": torch.bfloat16,
+        "link": "https://huggingface.co/meta-llama/Llama-3.1-8B",
         "license": True,
         "exceeds": True,
     }

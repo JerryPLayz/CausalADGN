@@ -8,7 +8,8 @@ from .RoPEDirectedNeighbourhoodAggregation import RoPEDirectedNeighborhoodAggreg
 from .graph_utils import *
 from .profiler import Profiler
 from .identifiers import short_id
-from .utils import save_history
+from .utils import save_history, flush_gpu
+from .llm_wrapper import *
 
 __all__ = [
     "CADGNEncoder",
@@ -24,5 +25,9 @@ __all__ = [
     "Profiler",
     "short_id",
     "save_history",
+    "flush_gpu",
+    "LLMOutputs",
+    "LLMWrapper",
+
 ]
 

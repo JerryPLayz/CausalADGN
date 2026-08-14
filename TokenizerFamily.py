@@ -12,6 +12,7 @@ from transformers import TokenizersBackend, SentencePieceBackend
 from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, short_id
 
 from stager import Staged
+import env
 
 _DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
@@ -122,7 +123,7 @@ class TokenizerFamily(nn.Module, Staged):
         :return: `TokenizerFamily` object
         """
         # Tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        tokenizer = AutoTokenizer.from_pretrained(model_id, token=env.HF_TOKEN)
 
         # Many LLMs do not ship with a pad token, which we require for batching
         if tokenizer.pad_token is None:
@@ -132,7 +133,8 @@ class TokenizerFamily(nn.Module, Staged):
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             dtype=torch_dtype,
-            low_cpu_mem_usage=True
+            low_cpu_mem_usage=True,
+            token=env.HF_TOKEN,
         )
 
         embed_layer = model.get_input_embeddings()
