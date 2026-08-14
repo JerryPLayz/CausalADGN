@@ -3,6 +3,7 @@
 /cp/
 /hf_datasets/
 /saves/
+/search_results/
 # Profile Inspections are not needed
 #.idea/inspectionProfiles/*
 

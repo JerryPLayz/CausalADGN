@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Iterable, Optional, TypedDict, Any
+from typing import Iterable, Optional, TypedDict, Any, Callable
 from inspect import isdatadescriptor
 
 #from cadgn.graph_utils import GraphBatch, _RequiredBatchFields
@@ -329,6 +329,7 @@ class CADGNTrainer:
             val_dataloader: Optional[DataLoader[CLadderSample]]=None,
             checkpoint_dir: Optional[str | Path] = None,
             checkpoint_every: int = 10,
+            pruning_callback: Optional[Callable[[int, float], None]] = None,
     ) -> dict[str, list[float]]:
         """
         Trains Stage 1 across all TokenizerFamily objects.
@@ -338,11 +339,15 @@ class CADGNTrainer:
         :param val_dataloader: Optional; Validation metrics are computed after each epoch and logged under 'val/' keys.
         :param checkpoint_dir: Optional; Saves core + all families to disk every checkpoint_every epochs.
         :param checkpoint_every: Epoch interval for checkpointing (default 10)
+        :param pruning_callback: Optional callback for pruning during parameter search (default None)
         :return: history; metric name -> list of per-epoch averages.
         """
         self.core.configure_stage1()
         for fam in self.families:
             fam.configure_stage1()
+
+        if pruning_callback is not None and val_dataloader is None:
+            raise ValueError("pruning_callback requires val_dataloader to be provided: pruning decisions are based on val/loss.")
 
         optimizer = self._build_stage1_optimizer(config=config)
         history: dict[str, list[float]] = {}
@@ -429,6 +434,9 @@ class CADGNTrainer:
 
             else:
                 print(f"")
+
+            if pruning_callback is not None:
+                pruning_callback(epoch, val_loss)
         # end of epochs...
         if self.profiler.enabled:
             print(f"Profiler Summary:")

@@ -340,7 +340,12 @@ def embedding_norm_loss(
     h_norms = H.norm(dim=-1).detach()  # (num_nodes, ), for reference
 
     L_preserve = F.mse_loss(z_norms, h_norms)
-    L_floor = -torch.log(z_norms.clamp(min=epsilon)).mean()
+    # Strictly non-negative L_floor
+    L_floor = torch.clamp(
+        -torch.log(z_norms.clamp(min=epsilon)),
+        min=0.0
+    ).mean()
+
     return w_preserve * L_preserve + w_floor * L_floor
 
 

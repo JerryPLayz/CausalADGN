@@ -41,6 +41,8 @@ def visualize_graph_diff(
     threshold: float = 0.5,
     figsize: tuple[int, int] = (8, 6),
     title: str | None = None,
+    node_size: int = 1800,
+
 ) -> plt.Figure:
     """
     Renders a single differential graph comparing ground truth edges against
@@ -59,6 +61,7 @@ def visualize_graph_diff(
     :param title:           Optional figure title override
     :return:                Matplotlib Figure
     """
+    ## TODO: amend
     device = edge_logits.device
     true_edge_index = sample.data.edge_index.to(device)
     node_names = sample.node_names
@@ -90,7 +93,7 @@ def visualize_graph_diff(
     nx.draw_networkx_nodes(
         G, pos,
         node_color="#3498db",
-        node_size=1800,
+        node_size=node_size,
         ax=ax,
     )
 
@@ -121,6 +124,7 @@ def visualize_graph_diff(
             width=2.0,
             connectionstyle="arc3,rad=0.1",
             ax=ax,
+            node_size=node_size,
         )
 
     # Add a legend
