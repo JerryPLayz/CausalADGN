@@ -54,3 +54,15 @@ class GateClassifier(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)
+
+    @staticmethod
+    def calc_loss(gate_cls_logits, rung_t: int, device="cuda"):
+        rung_target = torch.tensor(
+            [rung_t],
+            dtype=torch.long,
+            device=torch.device(device) if type(device) is str else device,
+        )
+        loss = F.cross_entropy(gate_cls_logits.unsqueeze(0), rung_target)
+        return loss
+
+

@@ -1,11 +1,12 @@
 from pathlib import Path
-from typing import Iterable, Optional, TypedDict, Any, Callable
+from typing import Iterable, Optional, TypedDict, Any, Callable, Literal
 from inspect import isdatadescriptor
+from contextlib import nullcontext
 
 #from cadgn.graph_utils import GraphBatch, _RequiredBatchFields
 from dataclasses import dataclass
 from CADGNCore import CADGNCore
-from TokenizerFamily import TokenizerFamily
+from TokenizerFamily import TokenizerFamily, _DTYPE_MAP
 from losses import _generate_candidate_pairs, reconstruction_loss, generalized_mmd_loss
 from ds.cladder import CLadderSample, CLadderDataset
 from torch.utils.data import DataLoader
@@ -13,7 +14,8 @@ from graph_visualizer import visualize_graph_diff
 
 import torch
 import torch.nn as nn
-from cadgn import Profiler
+import torch.nn.functional as F
+from cadgn import Profiler, LLMWrapper, LLMOutputs, GateClassifier
 import matplotlib.pyplot as plt
 
 @dataclass
@@ -73,7 +75,21 @@ class Stage2Config:
     epochs: int = 100
     grad_clip: float = 1.0  # 0.0 disables clipping
 
-    reduction: str = 'mean'
+    # Dataset sampling & Gradient Accumulation
+    grad_accum_steps: int = 1  # 1 = batch-size of 1, (simulate larger batch-sizes for efficiency by calling `optimizer.step` on many independent samples at once.)
+    max_steps_per_epoch: Optional[int] = None  # full dataset per epoch; limit to cutoff samples after a point (due to CyclicSubsetSampler, we guarantee all samples will be seen across epochs)
+    max_steps_per_epoch_val: Optional[int] = None  # validation (same as above, but for validation set)
+
+    # MMD
+    mmd_kernel: Literal["imq", "rbf"] = 'imq'
+    mmd_beta: float= 0.5
+
+    # Graph Injection
+    graph_first: bool= True
+
+    # losses
+    w_mmd = 1.0
+    w_gate = 1.0
 
 
 class CADGNTrainer:
@@ -237,7 +253,7 @@ class CADGNTrainer:
         dict[str, torch.Tensor],  # pred_edge_logits per family (detached)
     ]:
         """
-        Single Forward Pass for Stage 1. Runs the full pipeline once per family. Candidate paris are generated once and shared (graph topology identical)
+        Single Forward Pass for Stage 1. Runs the full pipeline once per family. Candidate pairs are generated once and shared (graph topology identical)
         :param sample: an individual graph to process in CLadderSample format.
         :param config:
         :return: Flat metrics dict (only 'loss' is gradient-attached)
@@ -457,12 +473,313 @@ class CADGNTrainer:
 
         all_metrics: dict[str, list[float]] = {}
 
-        for batch in val_dataloader:
-            metrics, _, _ = self._stage1_step(sample=batch, config=config)
+        for step_idx, sample in enumerate(val_dataloader):
+            metrics, _, _ = self._stage1_step(sample=sample, config=config)
             for k,v in metrics.items():
                 all_metrics.setdefault(k, []).append(
                     v.item() if isinstance(v, torch.Tensor) else v
                 )
         return {k: sum(v) / len(v) for k, v in all_metrics.items()}
 
-    
+    def _stage2_step(
+            self,
+            sample: CLadderSample,
+            config: Stage2Config,
+            family: TokenizerFamily,
+            llm: LLMWrapper,
+            inference: bool = False,
+    ) -> tuple[
+        dict[str, torch.Tensor],  # metrics (loss is gradient attached)
+        torch.Tensor,  # pred_embeds (detached)
+        torch.Tensor,  # pred_edge_logits (detached)
+        torch.Tensor,  # gate_classifier logits (detached)
+        LLMOutputs,
+    ]:
+        """
+        Single forward pass for Stage 2. Runs the full pipeline for one family.
+        Gradient Flow:
+            L_mmd -> Z_approx -> Post Projector -> LLM (frozen) -> Z_intermediate -> Pre Projector -> Z
+            see gate classifier logits in return for gradients for Gate Classifier (to do by caller)
+        :param config:
+        :param family: The LLM / TokenizerFamily to train for.
+        :return: (dict: loss_dict, Tensor: pred_embeds (nodes), Tensor: pred_edge_logits (edges), Tensor: gate classifier logits, LLMOutputs)
+        """
+        if llm is None:
+            raise RuntimeError("`llm` must be provided.")
+        if not llm.is_loaded:
+            raise RuntimeError("`llm` must be loaded either as context or directly via `llm.load()`")
+
+        edge_index = sample.data.edge_index.to(self.device)
+        node_texts = sample.node_names
+
+        with self.profiler.section("S2 // 1-candidate_pairs"):
+            candidate_pairs = _generate_candidate_pairs(
+                num_nodes=len(node_texts),
+                device=self.device
+            )
+
+        with self.profiler.section("S2 // 2-PreLLM"):
+            H, Z, embeds, attention_mask = self._stage1_p1(
+                family=family,
+                node_texts=node_texts,
+                edge_index=edge_index,
+            )
+            # intermediate_Z: (num_nodes, llm_dim) in llm_dtype
+            intermediate_Z = family.pre_projector(Z)
+
+        with self.profiler.section("S2 // 3-LLM"):
+            prompt_embeds = llm.embed_prompt(sample.prompt, family.tokenizer, family.embed_layer, self.device)
+            # (prompt_len + suffix_len, llm_dim)
+
+            input_embeds, llm_mask = LLMWrapper.assemble_inputs(
+                graph_embeds=intermediate_Z,
+                prompt_embeds=prompt_embeds,
+                graph_first=config.graph_first,
+            )
+            # input_embeds: (1, num_nodes + prompt_len, llm_dim)
+            # nb: graph nodes may be first or last depending on param above.
+
+            llm_outputs = llm.forward(
+                input_embeds=input_embeds,
+                attention_mask=attention_mask,
+                num_nodes=len(node_texts),
+                graph_first=config.graph_first,
+                inference=inference,  # preserve computation graph for PreProjector (during .backwards())
+            )
+            # llm_outputs.graph_hidden: (num_nodes, llm_dim)
+            # llm_outputs.last_token_hidden: (llm_dim,)
+        # Post-LLM
+        with self.profiler.section("S2 // 4-PostLLM"):
+            # Post Projector
+            Z_approx = family.post_projector(llm_outputs.graph_hidden)
+            # (num_nodes, ca_dgn_dim)
+
+            # Shared decoders
+            pred_embeds, pred_edge_logits = self._stage1_p2(
+                family=family,
+                Z=Z_approx,
+                candidate_pairs=candidate_pairs,
+                attention_mask=attention_mask,
+            )
+            # pred_embeds: (num_nodes, ca_dgn_dim), pred_edge_logits: (num_nodes * num_nodes)
+
+            # Gate Classifier on last token of full [graph + prompt] sequence
+            gate_logits = family.gate_classifier(llm_outputs.last_token_hidden.unsqueeze(0)).squeeze(0)
+            # (3,) - raw logits over {associational, interventional, counterfactual}
+
+        with self.profiler.section("S2 // 5-Loss"):
+            # Primary loss here is MMD between Z_approx and Z.
+            L_mmd = generalized_mmd_loss(
+                Z_dict={
+                    "Z": Z.detach(),
+                    "Z_approx": Z_approx,  # trained output
+                },
+                kernel=config.mmd_kernel,
+                beta=config.mmd_beta,
+            )
+
+            L_total = config.w_mmd * L_mmd
+        return (
+            {
+                "loss": L_total,
+                "L_mmd": L_mmd.detach(),
+            },
+            pred_embeds.detach(),
+            pred_edge_logits.detach(),
+            gate_logits,
+            llm_outputs,
+
+        )
+
+    def train_stage2(
+            self,
+            config: Stage2Config,
+            family: TokenizerFamily,
+            train_dataloader: DataLoader[CLadderSample],
+            val_dataloader: Optional[DataLoader[CLadderSample]],
+            checkpoint_dir: Optional[str | Path] = None,
+            checkpoint_every: int = 10,
+            llmw: Optional[LLMWrapper] = None,
+    ):
+        """
+        Trains Stage 2 across one family (llm) and the core.
+
+
+        :param config: Stage2Config; all training hyperparameters
+        :param family: The specific TokenizerFamily to train on (i.e. has to load this Family's LLM)
+        :param train_dataloader: Yeilds 'batches' to train on. (single sample batches)
+        :param val_dataloader: Optional; validation metrics are computed on this data.
+        :param checkpoint_dir: Optional; Saves core + families to disk every checkpoint_every epochs.
+        :param checkpoint_every:Epoch interval for checkpointing (default 10)
+        :param llmw: If not None, this `LLMWrapper` will be used as context instead of
+        :return: history; metric name -> list of per-epoch averages
+        """
+        self.core.configure_stage2()
+        family.configure_stage2()
+
+        optimizer = self._build_stage2_optimizer(family=family, config=config)
+        history: dict[str, list[float]] = {}
+        llm_dtype = _DTYPE_MAP.get(family.__config__["llm_dtype"], torch.bfloat16)
+
+        ctx = (
+            nullcontext(llmw)
+            if llmw is not None
+            else LLMWrapper(
+                family.model_id,
+                device=self.device,
+                torch_dtype=llm_dtype,
+            )
+        )
+        print(f"Training Stage 2 for {family.model_id}:")
+        # Context-load LLM via LLMWrapper to ensure proper disposal after training.
+        with ctx as llm:
+            yes_ids, no_ids = llm.get_yn_token_sets(family.tokenizer)
+            for epoch in range(config.epochs):
+                self.core.train()
+                family.train()
+
+                epoch_metrics: dict[str, list[float]] = {}
+                optimizer.zero_grad()
+
+                with self.profiler.section("S2 // Epoch"):
+                    for step_idx, sample in enumerate(train_dataloader):
+                        with self.profiler.section("S2 // 00 - Step"):
+                            metrics, pred_node_embeds, pred_edge_logits, gate_cls_logits, llm_outputs = self._stage2_step(sample=sample, config=config, family=family, llm=llm)
+                        # Gate Classifier Loss add
+
+                        metrics["L_gate"] = GateClassifier.calc_loss(
+                            gate_cls_logits=gate_cls_logits,
+                            rung_t=sample.rung,
+                            device=self.device,
+                        )
+                        metrics["loss"] = metrics["loss"] + metrics["L_gate"] * config.w_gate
+                        loss = metrics["loss"] / config.grad_accum_steps
+                        loss.backward()
+
+                        is_accum_step = (step_idx + 1) % config.grad_accum_steps == 0
+                        is_last_step = (
+                            config.max_steps_per_epoch is not None
+                            and step_idx + 1 >= config.max_steps_per_epoch
+                        )
+
+                        if is_accum_step or is_last_step:
+                            if config.grad_clip > 0.0:
+                                nn.utils.clip_grad_norm_(
+                                    [
+                                        p for src in [self.core, family]
+                                        for p in src.parameters()
+                                        if p.requires_grad
+                                    ],
+                                    config.grad_clip
+                                )
+                            optimizer.step()
+                            optimizer.zero_grad()
+
+                        for k, v in metrics.items():
+                            epoch_metrics.setdefault(k, []).append(
+                                v.item() if isinstance(v, torch.Tensor) else v
+                            )
+                # Post-epoch
+                epoch_avg = {
+                    k: sum(v) / len(v)
+                    for k, v in epoch_metrics.items()
+                }
+
+                # Validate
+                if val_dataloader is not None:
+                    with self.profiler.section("S2 // Epoch (Vald)"):
+                        val_avg = self._eval_stage2(
+                            val_dataloader=val_dataloader,
+                            config=config,
+                            family=family,
+                            llm=llm,
+                            yes_ids=yes_ids,
+                            no_ids=no_ids,
+                        )
+
+                    for k,v in val_avg.items():
+                        epoch_avg[f"val/{k}"] = v
+
+                for k,v in epoch_avg.items():
+                    history.setdefault(k, []).append(v)
+
+                if (
+                    checkpoint_dir is not None
+                    and (epoch + 1) % checkpoint_every == 0
+                ):
+                    root = Path(checkpoint_dir) / f"epoch_{epoch:04d}"
+                    self.core.save(path=root / "cadgn_core", model_id=f"{self.core.encoder.conv.__name__[:10]}-{self.core.encoder.hidden_dim}")
+                    safe_name = family.model_id.replace("/", "-")
+                    family.save(path=root / safe_name, model_id=family.model_id)
+
+                # Print Epoch Statistics
+                print(
+                    f"Epoch {epoch:>4d} | "
+                    f"Train Loss: {epoch_avg.get('loss', float('nan')):.6f}",
+                    end=""
+                )
+                if val_dataloader is not None:
+                    print(
+                        f" | Val Loss: {epoch_avg.get('val/loss', float('nan')):.6f} | "
+                        f"Accuracy: {epoch_avg.get('val/accuracy', float('nan')):.4f}",
+                        end=""
+                    )
+                if self.profiler.enabled:
+                    print(
+                        f" | {self.profiler.get_latest_n('S2 // Epoch'):.2f}s"
+                    )
+                else:
+                    print("")
+            # end of epochs
+            if self.profiler.enabled:
+                print(f"Profiler Summary:")
+                print(self.profiler.summary(sort_by="total"))
+        return history
+
+    @torch.no_grad()
+    def _eval_stage2(
+            self,
+            val_dataloader: DataLoader[CLadderSample],
+            config: Stage2Config,
+            family: TokenizerFamily,
+            llm: Optional[LLMWrapper],
+            yes_ids: set[int],
+            no_ids: set[int],
+    ) -> dict[str, float]:
+        """
+        Validation pass for Stage 2.
+        Computes loss metrics (same as training), plus yes/no accuracy, confidence and yn_coverage diagnostics.
+
+        :param val_dataloader:
+        :param config:
+        :param family:
+        :param llm:
+        :param yes_ids: from `llm.get_yn_token_sets()`
+        :param no_ids:  from `llm.get_yn_token_sets()`
+        :return: dict of per-metric averages over validation samples.
+        """
+        self.core.eval()
+        family.eval()
+
+        all_metrics: dict[str, list[float]] = {}
+
+        for step_idx, sample in enumerate(val_dataloader):
+            pass
+
+        """
+        Don't forget, L_gate is separate from the _step function.
+        metrics["L_gate"] = GateClassifier.calc_loss(
+                            gate_cls_logits=gate_cls_logits,
+                            rung_t=sample.rung,
+                            device=self.device,
+                        )
+        metrics["loss"] = metrics["loss"] + metrics["L_gate"] * config.w_gate
+                        
+        """
+
+
+
+
+
+
+

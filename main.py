@@ -6,7 +6,7 @@ from graph_visualizer import visualize_graph_diff
 from losses import _generate_candidate_pairs
 from models_config import models
 from ds.cladder import CLadderDataset, CLadderSample, load_cladder_v1_5, CLadderLoaderConfig
-from cadgn import save_history
+from cadgn import save_history, flush_gpu
 import seaborn as sns
 import pandas as pd
 import math
@@ -14,7 +14,10 @@ import math
 
 ca_dgn_dim = 256
 max_seq_len = 128
-do_models = ["Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B"]
+#do_models = ["Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B"]
+
+# Lets load the larger models.
+do_models = ["Qwen/Qwen3-8B-FP8", "meta-llama/Llama-3.1-8B"]
 
 dsConfig = CLadderLoaderConfig(rung_filter=None, query_types=None, skip_unparseable=True)
 org_ds = load_cladder_v1_5(dsConfig)
@@ -42,15 +45,20 @@ core: CADGNCore = CADGNCore(
     ca_dgn_dim=ca_dgn_dim,
 )
 
-families: list[TokenizerFamily]  = [
-    TokenizerFamily.from_pretrained(
-        model_id=k,
-        ca_dgn_dim=ca_dgn_dim,
-        max_seq_len=max_seq_len,
-    )
-    for k, v in models.items()
-    if k in do_models
-]
+
+families: list[TokenizerFamily] = []
+for k,v in models.items():
+    if k in do_models:
+        t = TokenizerFamily.from_pretrained(
+            model_id=k,
+            ca_dgn_dim=ca_dgn_dim,
+            max_seq_len=max_seq_len,
+        )
+        families.append(t)
+        #flush_gpu()
+
+print("Families loaded!")
+exit()
 
 trainer = CADGNTrainer(
     core=core,

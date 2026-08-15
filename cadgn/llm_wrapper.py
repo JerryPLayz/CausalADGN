@@ -25,12 +25,15 @@ class LLMOutputs:
     next_token_logits: Optional[torch.Tensor] = None
 
 
+# noinspection bad-assignment
 class LLMWrapper:
     """
     Agnostic wrapper for frozen HuggingFace LLMs in Stage 2
     Not a nn.Module as the LLM is frozen and never trained on. Gradient flows through `input_embeds` only, not LLM parameters.
     """
     _model: Module
+    # To append to every prompt before tokenization.
+    DEFAULT_YN_SUFFIX = " Answer with yes or no only."
 
     def __init__(
             self,
@@ -50,7 +53,8 @@ class LLMWrapper:
         self.device = torch.device(device) if isinstance(device, str) else device
         self.torch_dtype = torch_dtype
         self.layer_index = layer_index
-        self._model: nn.Module = None
+        self._model: Optional[nn.Module] = None
+        self._yn_cache: Optional[tuple[set[int], set[int]]] = None
 
     def load(self) -> "LLMWrapper":
         """
@@ -79,8 +83,10 @@ class LLMWrapper:
         if self._model is not None:
             del self._model
             self._model = None
+            self._yn_cache = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
 
     def __enter__(self) -> "LLMWrapper":
         return self.load()
@@ -100,10 +106,54 @@ class LLMWrapper:
             )
 
     @staticmethod
+    def apply_yn_suffix(
+            prompt: str,
+            suffix: str = DEFAULT_YN_SUFFIX,
+    ) -> str:
+        """
+        Append yes/no instruction suffix to the end of the prompt string.
+        :param prompt: Raw prompt (str) from `CLadderSample.prompt`
+        :param suffix: Instruction suffix (default DEFAULT_YN_SUFFIX)
+        :return: Modified Prompt String
+        """
+        return prompt.rstrip() + suffix
+
+    @staticmethod
+    def embed_prompt(
+            prompt: str,
+            tokenizer,
+            embed_layer: nn.Embedding,
+            device: torch.device,
+            suffix: str = DEFAULT_YN_SUFFIX,
+    ):
+        """
+        Apply yes/no suffix, tokenize and embed a prompt string.
+        :param prompt: Raw prompt string from `CLadderSample.prompt`
+        :param tokenizer: HuggingFace tokenizer for this family.
+        :param embed_layer: Frozen nn.Embedding from TokenizerFamily
+        :param device: Target device
+        :param suffix: Yes/no instruction suffix (default DEFAULT_YN_SUFFIX)
+        :return: (prompt_len + suffix_len, llm_dim) FloatTensor
+        """
+        modified = LLMWrapper.apply_yn_suffix(prompt, suffix)
+
+        tokens = tokenizer(
+            modified,
+            return_tensors="pt",
+            add_special_tokens=True
+        ).to(device)
+
+        with torch.no_grad():
+            embeds = embed_layer(tokens.input_ids)
+        # (1, prompt_len, llm_dim)
+
+        return embeds.squeeze(0)  # (prompt_len + suffix_len, llm_dim)
+
+    @staticmethod
     def assemble_inputs(
             graph_embeds: torch.Tensor,
             prompt_embeds: torch.Tensor,
-            graph_first: bool = True
+            graph_first: bool = True,
     ):
         """
         Assemble input_embeds and attention_mask from graph and prompt embeddings
@@ -234,6 +284,17 @@ class LLMWrapper:
 
         return _to_ids(yes_variants), _to_ids(no_variants)
 
+    def get_yn_token_sets(self, tokenizer) -> tuple[set[int], set[int]]:
+        """
+        Get the Yes/No token sets for this model.
+        Will cache to ensure no extra computation is required.
+        :param tokenizer: HuggingFace tokenizer for this family.
+        :return: yes_ids, no_ids; cached after first call
+        """
+        if self._yn_cache is None:
+            self._yn_cache = LLMWrapper.build_yn_token_sets(tokenizer)
+        return self._yn_cache
+
     @staticmethod
     def classify_yn(
             logits: torch.Tensor,
@@ -241,7 +302,7 @@ class LLMWrapper:
             no_ids: set[int],
     ) -> tuple[str, float, float]:
         """
-        Classify via controlled log-probability scoring.
+        Classify via controlled log-probability scoring. See Joshi et al. (2024, arXiv:2406.12158)
         Sums softmax probability mass over all yes/no token variants rather than relying on argmax.
         More robust to tokenization differences across families.
         :param logits: (vocab_size,) from LLMOutputs.next_token_logits

@@ -9,7 +9,7 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import TokenizersBackend, SentencePieceBackend
 
-from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, short_id
+from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, short_id, flush_gpu
 
 from stager import Staged
 import env
@@ -148,6 +148,7 @@ class TokenizerFamily(nn.Module, Staged):
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        flush_gpu()
 
         # Build the encoder and decoder heads
         encoder_head = EncoderHead(

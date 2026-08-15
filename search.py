@@ -129,7 +129,7 @@ class SearchConfig:
         max_steps_val: max_steps_per_epoch for validation dataloader (recommended: ~`max_steps_train` / len(train) * len(vald) )
     """
     n_trials: int = 100
-    search_epochs: int = 20
+    search_epochs: int = 15
     full_epochs: int = 100
     pruning_warmup: int = 10
     n_startup_trials: int = 10
@@ -225,16 +225,16 @@ class Stage1Search:
             weight_decay=trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
             # Loss Weights
-            w_nodes=trial.suggest_float("w_nodes", 0.1, 2.0),
-            w_edges=trial.suggest_float("w_edges", 0.1, 2.0),
-            w_norm=trial.suggest_float("w_norm", 0.001, 1.0, log=True),
-            w_mmd=trial.suggest_float("w_mmd", 0.01, 2.0),
-            w_mse=trial.suggest_float("w_mse", 0.01, 2.0),
-            w_cosine=trial.suggest_float("w_cosine", 0.01, 2.0),
+            #w_nodes=trial.suggest_float("w_nodes", 0.1, 2.0),
+            #w_edges=trial.suggest_float("w_edges", 0.1, 2.0),
+            #w_norm=trial.suggest_float("w_norm", 0.001, 1.0, log=True),
+            #w_mmd=trial.suggest_float("w_mmd", 0.01, 2.0),
+            #w_mse=trial.suggest_float("w_mse", 0.01, 2.0),
+            #w_cosine=trial.suggest_float("w_cosine", 0.01, 2.0),
 
             # Norm Loss
-            norm_w_preserve=trial.suggest_float("norm_w_preserve", 0.1, 2.0),
-            norm_w_floor=trial.suggest_float("norm_w_floor", 0.1, 2.0),
+            #norm_w_preserve=trial.suggest_float("norm_w_preserve", 0.1, 2.0),
+            #norm_w_floor=trial.suggest_float("norm_w_floor", 0.1, 2.0),
 
             # Training dynamics
             grad_accum_steps = trial.suggest_int("grad_accum_steps", 1, 16),
