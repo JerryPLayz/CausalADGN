@@ -13,12 +13,14 @@ from typing import Optional, Union, Any
 import torch
 import torch.nn as nn
 
-from cadgn import CADGNEncoder, CADGNDecoder, GraphBuilder
-from stager import Staged
+from .CADGN_Coders import CADGNEncoder, CADGNDecoder
+from .GraphBuilder import GraphBuilder
+from .stager import Staged
 
 
 class CADGNCore(nn.Module, Staged):
     SAVE_LOAD_PREFIX = "CADGNCore"
+
     def __init__(
             self,
             ca_dgn_dim: int,

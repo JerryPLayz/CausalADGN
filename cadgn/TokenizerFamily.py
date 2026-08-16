@@ -1,17 +1,21 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Optional, Iterable, Literal, Any
-import re
+from typing import Optional, Any
 
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import TokenizersBackend, SentencePieceBackend
 
-from cadgn import EncoderHead, DecoderHead, Projector, GateClassifier, short_id, flush_gpu
+from .heads import EncoderHead, DecoderHead
+from .projectors import Projector
+from .GateClassifier import GateClassifier
+from .identifiers import short_id
+from .utils import flush_gpu
+from .stager import Staged
+from .ModelCache import ModelCache
 
-from stager import Staged
 import env
 
 _DTYPE_MAP = {
@@ -19,6 +23,8 @@ _DTYPE_MAP = {
     "float16": torch.float16,
     "float32": torch.float32,
 }
+
+_cache = ModelCache()
 
 
 class TokenizerFamily(nn.Module, Staged):
@@ -122,30 +128,12 @@ class TokenizerFamily(nn.Module, Staged):
         :param torch_dtype: LLM weight dtype. bfloat16 recommended, as it matches typical LLM release formats and halves memory vs float32 for the embedding table.
         :return: `TokenizerFamily` object
         """
-        # Tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_id, token=env.HF_TOKEN)
-
-        # Many LLMs do not ship with a pad token, which we require for batching
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        # Extract Embedding Layer from LLM
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            dtype=torch_dtype,
-            low_cpu_mem_usage=True,
-            token=env.HF_TOKEN,
-        )
-
-        embed_layer = model.get_input_embeddings()
-        embed_layer.requires_grad_(False)
-        embed_layer = embed_layer.to(device)
+        tokenizer, embed_layer = _cache.get_components(model_id, torch_dtype, device)
 
         llm_dim = embed_layer.weight.shape[1]
         llm_dtype = embed_layer.weight.dtype
 
         # Discord the rest of the model
-        del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         flush_gpu()
@@ -234,7 +222,7 @@ class TokenizerFamily(nn.Module, Staged):
         with open(path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_config.json", "r") as f:
             config = json.load(f)
 
-        tokenizer = AutoTokenizer.from_pretrained(path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_tokenizer")
+        tokenizer: TokenizersBackend  = AutoTokenizer.from_pretrained(path / f"{cls.SAVE_LOAD_PREFIX}_{model_id}_tokenizer")
 
         # Reconstruct modules from config dimensions
         embed_layer = nn.Embedding(
