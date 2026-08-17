@@ -65,4 +65,11 @@ class GateClassifier(nn.Module):
         loss = F.cross_entropy(gate_cls_logits.unsqueeze(0), rung_target)
         return loss
 
+    @staticmethod
+    def is_correct(gate_cls_logits, rung_t: int, device="cuda"):
+        gate_pred = int(gate_cls_logits.argmax().item())
+        gate_correct = float(gate_pred == rung_t)
+        return gate_correct
+
+
 

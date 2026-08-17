@@ -38,6 +38,7 @@ def visualize_graph_diff(
     sample: CLadderSample,
     edge_logits: torch.Tensor,       # (num_candidates,)  raw logits
     candidate_pairs: torch.Tensor,   # (2, num_candidates)
+    pred_node_embeds: torch.Tensor,  # (num_nodes, llm_dim)
     threshold: float = 0.5,
     figsize: tuple[int, int] = (8, 6),
     title: str | None = None,

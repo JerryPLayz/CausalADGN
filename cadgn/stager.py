@@ -18,6 +18,16 @@ class Staged(ABC):
     def configure_stage2(self) -> None:
         ...
 
+    def configure_eval(self) -> None:
+        """
+        Configure all modules for inference.
+        Sets eval mode and freezes all parameters.
+        Intended for deployment or inference outside of a torch.no_grad() context.
+        :return:
+        """
+        self.eval()
+        self.requires_grad_(False)
+
     def _save_extra(self, path: Path, model_id: str, *args, **kwargs):
         pass
 

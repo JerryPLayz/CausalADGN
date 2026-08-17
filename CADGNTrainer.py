@@ -5,14 +5,18 @@ from contextlib import nullcontext
 #from cadgn.graph_utils import GraphBatch, _RequiredBatchFields
 from dataclasses import dataclass
 from cadgn.CADGNCore import CADGNCore
-from cadgn.TokenizerFamily import TokenizerFamily, _DTYPE_MAP
+from cadgn.TokenizerFamily import TokenizerFamily, DTYPE_MAP
 from losses import _generate_candidate_pairs, reconstruction_loss, generalized_mmd_loss
 from ds.cladder import CLadderSample
 from torch.utils.data import DataLoader
 
 import torch
 import torch.nn as nn
-from cadgn import Profiler, LLMWrapper, LLMOutputs, GateClassifier
+import torch.nn.functional as F
+
+from cadgn import Profiler, LLMWrapper, LLMOutputs, GateClassifier, Stage2Intermediates
+from torchmetrics.classification import MulticlassF1Score, BinaryF1Score
+from cadgn import BaselineSampleResult
 
 
 @dataclass
@@ -465,8 +469,10 @@ class CADGNTrainer:
     ) -> dict[str, float]:
         """Validation pass, no gradients. Returns per-metric batch averages."""
         self.core.eval()
+        self.core.configure_eval()
         for fam in self.families:
             fam.eval()
+            fam.configure_eval()
 
         all_metrics: dict[str, list[float]] = {}
 
@@ -489,8 +495,9 @@ class CADGNTrainer:
         dict[str, torch.Tensor],  # metrics (loss is gradient attached)
         torch.Tensor,  # pred_embeds (detached)
         torch.Tensor,  # pred_edge_logits (detached)
-        torch.Tensor,  # gate_classifier logits (detached)
+        torch.Tensor,  # gate_classifier logits (caller must compute L_gate)
         LLMOutputs,
+        Stage2Intermediates,
     ]:
         """
         Single forward pass for Stage 2. Runs the full pipeline for one family.
@@ -499,7 +506,7 @@ class CADGNTrainer:
             see gate classifier logits in return for gradients for Gate Classifier (to do by caller)
         :param config:
         :param family: The LLM / TokenizerFamily to train for.
-        :return: (dict: loss_dict, Tensor: pred_embeds (nodes), Tensor: pred_edge_logits (edges), Tensor: gate classifier logits, LLMOutputs)
+        :return: (dict: loss_dict, Tensor: pred_embeds (nodes), Tensor: pred_edge_logits (edges), Tensor: gate classifier logits, LLMOutputs, Stage2Intermediates: dataclass of intermediate (detached) tensors for evaluation)
         """
         if llm is None:
             raise RuntimeError("`llm` must be provided.")
@@ -538,7 +545,7 @@ class CADGNTrainer:
 
             llm_outputs = llm.forward(
                 input_embeds=input_embeds,
-                attention_mask=attention_mask,
+                attention_mask=llm_mask,
                 num_nodes=len(node_texts),
                 graph_first=config.graph_first,
                 inference=inference,  # preserve computation graph for PreProjector (during .backwards())
@@ -576,6 +583,7 @@ class CADGNTrainer:
             )
 
             L_total = config.w_mmd * L_mmd
+
         return (
             {
                 "loss": L_total,
@@ -585,6 +593,12 @@ class CADGNTrainer:
             pred_edge_logits.detach(),
             gate_logits,
             llm_outputs,
+            Stage2Intermediates.from_step(
+                H = H.detach(),
+                Z = Z.detach(),
+                int_Z=intermediate_Z.detach(),
+                Z_approx = Z_approx.detach(),
+            )
 
         )
 
@@ -616,7 +630,7 @@ class CADGNTrainer:
 
         optimizer = self._build_stage2_optimizer(family=family, config=config)
         history: dict[str, list[float]] = {}
-        llm_dtype = _DTYPE_MAP.get(family.__config__["llm_dtype"], torch.bfloat16)
+        llm_dtype = DTYPE_MAP.get(family.__config__["llm_dtype"], torch.bfloat16)
 
         ctx = (
             nullcontext(llmw)
@@ -635,13 +649,15 @@ class CADGNTrainer:
                 self.core.train()
                 family.train()
 
+
                 epoch_metrics: dict[str, list[float]] = {}
                 optimizer.zero_grad()
 
                 with self.profiler.section("S2 // Epoch"):
+
                     for step_idx, sample in enumerate(train_dataloader):
                         with self.profiler.section("S2 // 00 - Step"):
-                            metrics, pred_node_embeds, pred_edge_logits, gate_cls_logits, llm_outputs = self._stage2_step(sample=sample, config=config, family=family, llm=llm)
+                            metrics, pred_node_embeds, pred_edge_logits, gate_cls_logits, llm_outputs, intermediates = self._stage2_step(sample=sample, config=config, family=family, llm=llm)
                         # Gate Classifier Loss add
 
                         metrics["L_gate"] = GateClassifier.calc_loss(
@@ -689,15 +705,19 @@ class CADGNTrainer:
                             val_dataloader=val_dataloader,
                             config=config,
                             family=family,
-                            llm=llm,
+                            llmw=llm,
                             yes_ids=yes_ids,
                             no_ids=no_ids,
                         )
+                        self.core.configure_stage2()
+                        family.configure_stage2()
+                        self.core.train()
+                        family.train()
 
-                    for k,v in val_avg.items():
+                    for k, v in val_avg.items():
                         epoch_avg[f"val/{k}"] = v
 
-                for k,v in epoch_avg.items():
+                for k, v in epoch_avg.items():
                     history.setdefault(k, []).append(v)
 
                 if (
@@ -739,7 +759,7 @@ class CADGNTrainer:
             val_dataloader: DataLoader[CLadderSample],
             config: Stage2Config,
             family: TokenizerFamily,
-            llm: Optional[LLMWrapper],
+            llmw: Optional[LLMWrapper],
             yes_ids: set[int],
             no_ids: set[int],
     ) -> dict[str, float]:
@@ -750,33 +770,152 @@ class CADGNTrainer:
         :param val_dataloader:
         :param config:
         :param family:
-        :param llm:
+        :param llmw: optional - a wrapper context containing the LLM to use for inference. If not provided, will be created (and load the family.model_id LLM into memory)
         :param yes_ids: from `llm.get_yn_token_sets()`
         :param no_ids:  from `llm.get_yn_token_sets()`
         :return: dict of per-metric averages over validation samples.
         """
         self.core.eval()
         family.eval()
+        self.core.configure_eval()
+        family.configure_eval()
 
         all_metrics: dict[str, list[float]] = {}
+        per_sample: list[BaselineSampleResult] = []
+        llm_dtype = DTYPE_MAP.get(family.__config__["llm_dtype"], torch.bfloat16)
 
-        for step_idx, sample in enumerate(val_dataloader):
-            pass
+        ctx = (
+            nullcontext(llmw)
+            if llmw is not None
+            else LLMWrapper(
+                family.model_id,
+                device=self.device,
+                torch_dtype=llm_dtype,
+            )
+        )
 
-        """
-        Don't forget, L_gate is separate from the _step function.
-        metrics["L_gate"] = GateClassifier.calc_loss(
-                            gate_cls_logits=gate_cls_logits,
-                            rung_t=sample.rung,
-                            device=self.device,
-                        )
-        metrics["loss"] = metrics["loss"] + metrics["L_gate"] * config.w_gate
-                        
-        """
+        # F1 Trackers
+        gate_f1 = MulticlassF1Score(
+            num_classes=3,
+            average="none",  # per-class F1
+        ).to(device=self.device)
 
+        gate_f1_macro = MulticlassF1Score(
+            num_classes=3,
+            average="macro",  # unweighted mean
+        )
 
+        # Yes/No macro (exclude abstain samples)
+        yn_f1 = BinaryF1Score().to(device=self.device)
+        abstain_count = 0
+        total_count = 0
 
+        with ctx as llm:
+            for step_idx, sample in enumerate(val_dataloader):
+                total_count += 1
+                metrics, pred_embeds, pred_edge_logits, gate_logits, llm_outputs, intermediates = self._stage2_step(
+                    sample=sample,
+                    config=config,
+                    family=family,
+                    llm=llm,
+                    inference=True
+                )
 
+                # GateClassifier evaluation
+                L_gate = GateClassifier.calc_loss(
+                    gate_cls_logits=gate_logits,
+                    rung_t=sample.rung,
+                    device=self.device,
+                )
 
+                gate_pred = int(gate_logits.argmax().item())
+                gate_correct = GateClassifier.is_correct(gate_logits, sample.rung)
 
+                rung_target = torch.tensor([sample.rung], device=self.device)
+                gate_pred_t = gate_logits.argmax().unsqueeze(0)
+
+                gate_f1.update(gate_pred_t, rung_target)
+                gate_f1_macro.update(gate_pred_t, rung_target)
+
+                # Yes/No Classification (CLadder)
+                # noinspection bad-argument-type
+                prediction, confidence, yn_coverage = LLMWrapper.classify_yn(
+                    logits=llm_outputs.next_token_logits,
+                    yes_ids=yes_ids,
+                    no_ids=no_ids,
+                )
+
+                if prediction != "abstain":
+                    yn_pred = torch.tensor(
+                        [1 if prediction == "yes" else 0], device=self.device
+                    )
+                    yn_target = torch.tensor(
+                        [1 if sample.label == "yes" else 0], device=self.device
+                    )
+                    yn_f1.update(yn_pred, yn_target)
+                else:
+                    abstain_count += 1
+
+                yn_correct = (
+                    float(prediction == sample.label)
+                    if prediction != "abstain"  # allow the model to safely abstain
+                    else 0.5
+                )
+
+                per_sample.append(BaselineSampleResult(
+                    sample_id=sample.sample_id,
+                    rung=sample.rung,
+                    label=sample.label,
+                    prediction=prediction,
+                    yn_correct=yn_correct,
+                    confidence=confidence,
+                    yn_coverage=yn_coverage,
+                    gate_pred=gate_pred,
+                    gate_correct=gate_correct,
+                    gate_logits=gate_logits.tolist(),  # detach implicit by this operation
+                ))
+
+                # Accumulate
+                metrics["L_gate"] = L_gate
+                metrics["loss"] = metrics["loss"] + metrics["L_gate"] * config.w_gate
+                for k, v in metrics.items():
+                    all_metrics.setdefault(k, []).append(
+                        v.item() if isinstance(v, torch.Tensor) else v
+                    )
+
+                all_metrics.setdefault("accuracy", []).append(yn_correct)
+                all_metrics.setdefault("confidence", []).append(confidence)
+                all_metrics.setdefault("yn_coverage", []).append(yn_coverage)
+                all_metrics.setdefault("gate_correct", []).append(gate_correct)
+                # Per-rung breakdowns to support statistics
+                all_metrics.setdefault(f"accuracy_rung{sample.rung}", []).append(yn_correct)
+                all_metrics.setdefault(f"yn_coverage_rung{sample.rung}", []).append(yn_coverage)
+                all_metrics.setdefault(f"abstain_rung{sample.rung}", []).append(float(prediction == "abstain"))
+
+                # Geometric Diagnostics - directly reflects whether the projectors are properly preserving the latent structure.
+                norm_ratio = (intermediates.Z_approx.norm(dim=-1).mean() / intermediates.Z.norm(dim=-1).mean().clamp(min=1e-8)).item()
+                cos_sim = F.cosine_similarity(intermediates.Z_approx, intermediates.Z, dim=-1).mean().item()
+                all_metrics.setdefault("norm_ratio", []).append(norm_ratio)
+                all_metrics.setdefault("z_cos_sim", []).append(cos_sim)
+
+        # Compute F1 Scores
+        gate_f1_per_class = gate_f1.compute()
+        # (3, ) - F1 per rung: [associational, interventional, counterfactual]
+        result = {k: sum(v) / len(v) for k, v in all_metrics.items()}
+
+        rung_names = ["assoc", "interv", "counterfact"]  # 0,1,2
+        for i, name in enumerate(rung_names):
+            result[f"gate_f1_{name}"] = gate_f1_per_class[i].item()
+
+        result["gate_f1_macro"] = gate_f1_macro.compute().item()
+        result["yn_f1"] = yn_f1.compute().item() if total_count > abstain_count else 0.0
+        result["abstain_rate"] = abstain_count / total_count if total_count > 0 else 0.0
+
+        for rung in range(3):
+            for metric in ("accuracy", "yn_coverage", "abstain"):
+                key = f"{metric}_rung{rung}"
+                if key not in result:
+                    result[key] = float("nan")
+
+        return result
 

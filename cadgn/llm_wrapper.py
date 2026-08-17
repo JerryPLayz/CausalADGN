@@ -98,7 +98,7 @@ class LLMWrapper:
     def is_loaded(self) -> bool:
         return self._model is not None
 
-    def _require_loaded(self) -> None:
+    def require_loaded(self) -> None:
         if self._model is None:
             raise RuntimeError(
                 "LLMWrapper: model is not loaded!"
@@ -196,7 +196,7 @@ class LLMWrapper:
         :param inference: True during evaluation, False during training.
         :return: ~`LLMOutputs`
         """
-        self._require_loaded()
+        self.require_loaded()
 
         def _run() -> "LLMOutputs":
             # noinspection PyCallingNonCallable
@@ -245,6 +245,12 @@ class LLMWrapper:
         :param graph_first: Must match `graph_first` used in assemble_inputs()
         :return: (num_nodes, llm_dim)
         """
+        if num_nodes == 0:
+            return torch.empty(
+                0, hidden.size(-1),
+                dtype=hidden.dtype,
+                device=hidden.device,
+            )
         h = hidden.squeeze(0)  # (total_len, llm_dim)
         return h[:num_nodes] if graph_first else h[-num_nodes:]
 

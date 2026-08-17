@@ -8,6 +8,7 @@ from scipy.stats import iqr, quantile
 
 import torch
 
+
 class Profiler:
     """
     Lightweight Section Timer for the CA-DGN training pipeline.

@@ -13,8 +13,7 @@ from typing import Optional, Union, Any
 import torch
 import torch.nn as nn
 
-from .CADGN_Coders import CADGNEncoder, CADGNDecoder
-from .GraphBuilder import GraphBuilder
+from .modules import CADGNEncoder, CADGNDecoder, GraphBuilder
 from .stager import Staged
 
 

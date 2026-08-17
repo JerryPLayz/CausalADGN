@@ -1,4 +1,5 @@
 import pandas as pd
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
 import gc
@@ -40,3 +41,38 @@ def save_history(
 
     df.to_csv(path, index=False)
     return df
+
+
+@dataclass
+class Stage2Intermediates:
+    """
+    Stores detached versions of all intermediate tensors for evaluation in Stage2 (for effectiveness of model architecture)
+    """
+    H: torch.Tensor  # EncoderHead output
+    Z: torch.Tensor  # CADGNEncoder output
+    int_Z: torch.Tensor  # Pre-Projector output (to LLM)
+    Z_approx: torch.Tensor  # Post-Projector output (to CADGNDecoder & GraphBuilder)
+
+    @classmethod
+    def from_step(
+            cls,
+            H: torch.Tensor,
+            Z: torch.Tensor,
+            int_Z: torch.Tensor,
+            Z_approx: torch.Tensor,
+    ) -> "Stage2Intermediates":
+        """
+
+        :param H: EncoderHead output
+        :param Z: CADGNEncoder output
+        :param int_Z: Pre-Projector output (to LLM)
+        :param Z_approx: Post-Projector output (to CADGNDecoder and GraphBuilder)
+        :return: Stage2Intermediates object (all tensors detached)
+        """
+        return cls(
+            H = H.detach(),
+            Z = Z.detach(),
+            int_Z = int_Z.detach(),
+            Z_approx = Z_approx.detach(),
+        )
+

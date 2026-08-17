@@ -23,7 +23,7 @@ class ModelCache:
 
             # Is on correct device?
             embed_device: torch.device = next(cached['embeddings'].parameters()).device
-            if embed_device == device:
+            if hash(embed_device) == hash(device):
                 return cached['tokenizer'], cached['embeddings']
 
             # Not on right device (but still in cache)

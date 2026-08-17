@@ -5,20 +5,16 @@ from typing import Optional, Any
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from transformers import TokenizersBackend, SentencePieceBackend
 
-from .heads import EncoderHead, DecoderHead
-from .projectors import Projector
-from .GateClassifier import GateClassifier
+from .modules import EncoderHead, DecoderHead, Projector, GateClassifier
 from .identifiers import short_id
-from .utils import flush_gpu
+from .modules.utils import flush_gpu
 from .stager import Staged
 from .ModelCache import ModelCache
 
-import env
-
-_DTYPE_MAP = {
+DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
     "float32": torch.float32,
@@ -251,7 +247,7 @@ class TokenizerFamily(nn.Module, Staged):
             d_to=config["llm_dim"],
             expansion=config["projector_expansion"],
             dropout=config["projector_dropout"],
-            output_dtype=_DTYPE_MAP.get(config["pre_projector_dtype"], torch.bfloat16)
+            output_dtype=DTYPE_MAP.get(config["pre_projector_dtype"], torch.bfloat16)
         )
 
         post_projector = Projector(
@@ -259,7 +255,7 @@ class TokenizerFamily(nn.Module, Staged):
             d_to=config["ca_dgn_dim"],
             expansion=config["projector_expansion"],
             dropout=config["projector_dropout"],
-            output_dtype=_DTYPE_MAP.get(config["post_projector_dtype"], torch.bfloat16)
+            output_dtype=DTYPE_MAP.get(config["post_projector_dtype"], torch.bfloat16)
         )
 
         gate_classifier = GateClassifier(
