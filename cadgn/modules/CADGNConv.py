@@ -49,7 +49,6 @@ class CADGNConv(nn.Module):
             self.register_parameter('bias', None)
 
         # Graph Adaptive Gamma needs to be properly set, but for now, we can hardcode it.
-        # TODO: make dynamic
         self.gamma_adapt = nn.Parameter(torch.zeros(1))
 
         # Directed RoPE neighbourhood aggregation : replaces Phi in A-DGN
@@ -77,14 +76,13 @@ class CADGNConv(nn.Module):
                 edge_index: Adj,  # (2, num_edges
                 layer: int = 1
                 ) -> torch.Tensor:
-        ## todo: dynamicize gamma
         gamma = self.base_gamma + F.softplus(self.gamma_adapt)
 
         # Skew-symmetric Weight Matrix
         W_asym = self.W - self.W.t() - gamma * self.eye
 
         # Directed RoPE Neighbourhood Aggregation
-        phi_out = self.phi(x, edge_index, layer)
+        #phi_out = self.phi(x, edge_index, layer)
 
         # Forward Euler Discretisation Step: higher self.num_iters = finer detail
         # NB: layer is fixed through all iters.

@@ -83,14 +83,14 @@ class Stage2Config:
 
     # MMD
     mmd_kernel: Literal["imq", "rbf"] = 'imq'
-    mmd_beta: float= 0.5
+    mmd_beta: float = 0.5
 
     # Graph Injection
-    graph_first: bool= True
+    graph_first: bool = True
 
     # losses
-    w_mmd = 1.0
-    w_gate = 1.0
+    w_mmd: float = 1.0
+    w_gate: float = 1.0
 
 
 class CADGNTrainer:
