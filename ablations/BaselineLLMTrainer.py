@@ -27,7 +27,7 @@ class BaselineLLMTrainer:
             torch.device(device) if isinstance(device, str) else device
         )
         self.device = device
-        self.profiler = Profiler(enabled=False)
+        self.profiler = Profiler(enabled=True)
 
     def _build_optimizer(self, config: Stage2Config) -> torch.optim.AdamW:
         return torch.optim.AdamW(
@@ -43,7 +43,7 @@ class BaselineLLMTrainer:
             family: TokenizerFamily,  # for tokenizer + embed_layer only
             train_dataloader: DataLoader[CLadderSample],
             val_dataloader: Optional[DataLoader[CLadderSample]],
-            llmw: Optional[LLMWrapper]
+            llm: LLMWrapper
     ) -> dict[str, list[float]]:
         """
         Train GateClassifier only, no graph, no projectors.
@@ -52,68 +52,66 @@ class BaselineLLMTrainer:
         :param train_dataloader: DataLoader for training data
         :param val_dataloader: Optional validation dataloader
         :param llmw: Optional pre-loaded wrapper. If None, creates and manages a LLMWrapper context internally.
-        :return: metrics
+        :return: metrics, per_sample_per_epoch
         """
         # self.gate_classifier.train()
         self.gate_classifier.requires_grad_(True)
         optimizer = self._build_optimizer(config)
         history: dict[str, list[float]] = {}
+        per_sample_per_epoch = []
 
         llm_dtype = DTYPE_MAP.get(family.__config__["llm_dtype"], torch.bfloat16)
 
-        ctx = (
-            nullcontext(llmw)
-            if llmw is not None
-            else LLMWrapper(
-                family.model_id,
-                device=self.device,
-                torch_dtype=llm_dtype,
-            )
-        )
-
         print(f"Baseline training (no graph) for {family.model_id}:")
 
-        with ctx as llm:
-            yes_ids, no_ids = llm.get_yn_token_sets(family.tokenizer)
+        #with ctx as llm:
+        yes_ids, no_ids = llm.get_yn_token_sets(family.tokenizer)
 
-            for epoch in range(config.epochs):
-                self.gate_classifier.train()
-                epoch_metrics: dict[str, list[float]] = {}
-                optimizer.zero_grad()
+        for epoch in range(config.epochs):
+            #print(f"Epoch {epoch:04d} [", end="")
+            self.gate_classifier.train()
+            epoch_metrics: dict[str, list[float]] = {}
+            optimizer.zero_grad()
 
-                with self.profiler.section("BL // Epoch"):
-                    for step_idx, sample in enumerate(train_dataloader):
-                        with self.profiler.section("BL // Step"):
-                            _, gate_logits, _ = self._step(
-                                sample=sample,
-                                family=family,
-                                llm=llm,
-                                inference=False,
-                            )
-                        # GateClassifier loss; training signal
+            epoch_metrics.setdefault("L_gate", [])
+            epoch_metrics.setdefault("loss", [])
+
+            with self.profiler.section("BL // Epoch"):
+                for step_idx, sample in enumerate(train_dataloader):
+                    with self.profiler.section("BL // Step"):
+                        _, gate_logits, _ = self._step(
+                            sample=sample,
+                            family=family,
+                            llm=llm,
+                            inference=False,
+                        )
+                    # GateClassifier loss; training signal
+                    with self.profiler.section("BL // GateCls_CalcLoss"):
                         L_gate = GateClassifier.calc_loss(
                             gate_cls_logits=gate_logits,
                             rung_t=sample.rung,
                             device=self.device
                         )
 
-                        loss = (L_gate * config.w_gate) / config.grad_accum_steps
-                        loss.backward()
+                    loss = (L_gate * config.w_gate) / config.grad_accum_steps
+                    loss.backward()
 
-                        is_accum_step = (step_idx + 1) % config.grad_accum_steps == 0
-                        is_last_step = (
-                            config.max_steps_per_epoch is not None
-                            and step_idx + 1 >= config.max_steps_per_epoch
-                        )
-                        if is_accum_step or is_last_step:
-                            if config.grad_clip > 0.0:
-                                nn.utils.clip_grad_norm_(
-                                    list(self.gate_classifier.parameters()),
-                                    config.grad_clip,
-                                )
-                            optimizer.step()
-                            optimizer.zero_grad()
-                        epoch_metrics.setdefault("L_gate", []).append(L_gate.item())
+                    is_accum_step = (step_idx + 1) % config.grad_accum_steps == 0
+                    is_last_step = (
+                        config.max_steps_per_epoch is not None
+                        and step_idx + 1 >= config.max_steps_per_epoch
+                    )
+                    if is_accum_step or is_last_step:
+                        if config.grad_clip > 0.0:
+                            nn.utils.clip_grad_norm_(
+                                list(self.gate_classifier.parameters()),
+                                config.grad_clip,
+                            )
+                        optimizer.step()
+                        optimizer.zero_grad()
+                    epoch_metrics["L_gate"].append(L_gate.item())
+                    epoch_metrics["loss"].append(loss.item())
+                #print(".]")
             # Post Epoch...
             epoch_avg = {
                 k : sum(v) / len(v) for k, v in epoch_metrics.items()
@@ -137,7 +135,8 @@ class BaselineLLMTrainer:
                     epoch_avg[f"val/{k}"] = v
 
                 # Store per-sample values.
-                history.setdefault("_per_sample", []).append(val_per_sample)
+                per_sample_per_epoch.append(val_per_sample)
+                #history.setdefault("_per_sample", []).append(val_per_sample)
 
             for k, v in epoch_avg.items():
                 history.setdefault(k, []).append(v)
@@ -147,14 +146,14 @@ class BaselineLLMTrainer:
                     f"Epoch {epoch:>4d} | "
                     f"L_gate: {epoch_avg.get('L_gate', float('nan')):.6f} | "
                     f"Val Acc: {epoch_avg.get('val/accuracy', float('nan')):.4f} | "
-                    f"{self.profiler.get_latest_n('Baseline // Epoch'):.2f}s"
+                    f"{self.profiler.get_latest_n('BL // Epoch'):.2f}s (val: +{self.profiler.get_latest_n('BL // Val'):.2f}s)"
                 )
             else:
                 print(f"{epoch}", end=", ")
         if self.profiler.enabled:
             print("Baseline LLM Profiling Summary:")
             print(self.profiler.summary(sort_by="total"))
-        return history
+        return history, per_sample_per_epoch
 
     def _step(
             self,
@@ -172,12 +171,13 @@ class BaselineLLMTrainer:
         :return: (metrics {} - L_gate computed by caller, gate_logits: (3, ) raw logits, not detached, llm_outputs: LLMOutputs; next_token_logits is populated if inference=True)
         """
         llm.require_loaded()
-        prompt_embeds = LLMWrapper.embed_prompt(
-            prompt = sample.prompt,
-            tokenizer = family.tokenizer,
-            embed_layer=family.embed_layer,
-            device=self.device,
-        )  # (prompt_len, llm_dim)
+        with self.profiler.section("BL // 01-EmbedPrompt"):
+            prompt_embeds = LLMWrapper.embed_prompt(
+                prompt = sample.prompt,
+                tokenizer = family.tokenizer,
+                embed_layer=family.embed_layer,
+                device=self.device,
+            )  # (prompt_len, llm_dim)
 
         # No graph, prompt only, unsqueeze for batch dim
         input_embeds = prompt_embeds.unsqueeze(0)
@@ -188,17 +188,19 @@ class BaselineLLMTrainer:
             dtype=torch.long,
         )
 
-        llm_outputs = llm.forward(
-            input_embeds = input_embeds,
-            attention_mask = attention_mask,
-            num_nodes=0,
-            graph_first=False,
-            inference=inference,
-        )
+        with self.profiler.section("BL // 02-LLMForward"):
+            llm_outputs = llm.forward(
+                input_embeds = input_embeds,
+                attention_mask = attention_mask,
+                num_nodes=0,
+                graph_first=False,
+                inference=inference,
+            )
 
-        gate_logits = self.gate_classifier(
-            llm_outputs.last_token_hidden.unsqueeze(0),
-        ).squeeze(0)
+        with self.profiler.section("BL // 03-GateClsInfer"):
+            gate_logits = self.gate_classifier(
+                llm_outputs.last_token_hidden.unsqueeze(0),
+            ).squeeze(0)
 
         return {}, gate_logits, llm_outputs
 

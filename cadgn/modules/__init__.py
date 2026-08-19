@@ -8,6 +8,7 @@ from .GateClassifier import GateClassifier
 from .GraphBuilder import GraphBuilder
 from .heads import EncoderHead, DecoderHead
 from .projectors import Projector
+from .BaseEncoder import BaseEncoder
 
 __all__ = [
     "CADGNConv",
@@ -21,6 +22,7 @@ __all__ = [
     "GraphBuilder",
     "EncoderHead",
     "DecoderHead",
-    "Projector"
+    "Projector",
+    "BaseEncoder"
 
 ]

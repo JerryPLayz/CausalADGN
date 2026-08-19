@@ -7,9 +7,11 @@ import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
 from transformers import TokenizersBackend, SentencePieceBackend
+import gc
+from . import LLMWrapper
 
 from .modules import EncoderHead, DecoderHead, Projector, GateClassifier
-from .identifiers import short_id
+from .module_utils import short_id
 from .modules.utils import flush_gpu
 from .stager import Staged
 from .ModelCache import ModelCache
@@ -169,7 +171,7 @@ class TokenizerFamily(nn.Module, Staged):
             llm_dim=llm_dim,
             scale=gate_cls_scale,
             dropout=gate_cls_dropout,
-        ).to(device)
+        ).to(llm_dtype).to(device)
 
         return cls(
             model_id=model_id,
@@ -193,6 +195,92 @@ class TokenizerFamily(nn.Module, Staged):
         )
 
     # Persistence on Disk (save/load)
+    @classmethod
+    def from_llm(
+            cls,
+            llmw: LLMWrapper,
+            ca_dgn_dim: int,
+            max_seq_len: int,
+            encoder_dropout: float = 0.1,
+            decoder_dropout: float = 0.1,
+            projector_expansion: int = 2,
+            projector_dropout: float = 0.1,
+            gate_cls_scale: int = 8,
+            gate_cls_dropout: float = 0.1,
+            device: str | torch.device = "cuda",
+            torch_dtype: torch.dtype = torch.bfloat16,
+    ):
+        llmw.require_loaded()
+        tokenizer, embed_layer = _cache.get_from_llm(llmw)
+
+        llm_dim = embed_layer.weight.shape[1]
+        llm_dtype = embed_layer.weight.dtype
+
+        flush_gpu()
+
+        encoder_head = EncoderHead(
+            llm_dim=llm_dim,
+            ca_dgn_dim=ca_dgn_dim,
+            max_seq_len=max_seq_len,
+            dropout=encoder_dropout,
+        ).to(device)
+
+        decoder_head = DecoderHead(
+            llm_dim=llm_dim,
+            ca_dgn_dim=ca_dgn_dim,
+            max_seq_len=max_seq_len,
+            dropout=decoder_dropout,
+        ).to(device)
+
+        pre_projector = Projector(
+            d_from=ca_dgn_dim,
+            d_to=llm_dim,
+            expansion=projector_expansion,
+            dropout=projector_dropout,
+            output_dtype=llm_dtype
+        ).to(device)
+
+        post_projector = Projector(
+            d_from=llm_dim,
+            d_to=ca_dgn_dim,
+            expansion=projector_expansion,
+            dropout=projector_dropout,
+            output_dtype=torch.float32
+        ).to(device)
+
+        gate_classifier = GateClassifier(
+            llm_dim=llm_dim,
+            scale=gate_cls_scale,
+            dropout=gate_cls_dropout,
+        ).to(llm_dtype).to(device)
+
+        return cls(
+            model_id=llmw.model_id,
+            tokenizer=tokenizer,
+            embed_layer=embed_layer,
+            encoder_head=encoder_head,
+            decoder_head=decoder_head,
+            pre_projector=pre_projector,
+            post_projector=post_projector,
+            gate_classifier=gate_classifier,
+            llm_dim=llm_dim,
+            ca_dgn_dim=ca_dgn_dim,
+            max_seq_len=max_seq_len,
+            encoder_dropout=encoder_dropout,
+            decoder_dropout=decoder_dropout,
+            projector_expansion=projector_expansion,
+            projector_dropout=projector_dropout,
+            gate_cls_scale=gate_cls_scale,
+            gate_cls_dropout=gate_cls_dropout,
+            llm_dtype=llm_dtype,
+        )
+
+
+
+
+
+
+
 
     def _save_extra(self, path: Path, model_id: str, *args, **kwargs):
         self.tokenizer.save_pretrained(path / f"{self.SAVE_LOAD_PREFIX}_{model_id}_tokenizer")

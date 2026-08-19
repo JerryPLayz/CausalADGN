@@ -5,8 +5,18 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 import env
+from .modules.utils import is_large_model
+
+
+
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.bfloat16
+)
+
 
 # Output container (to simplify matters)
 @dataclass
@@ -22,6 +32,8 @@ class LLMOutputs:
     hidden_states: torch.Tensor
     graph_hidden: torch.Tensor
     last_token_hidden: torch.Tensor
+    input_embeds: torch.Tensor
+    attention_mask: torch.Tensor
     next_token_logits: Optional[torch.Tensor] = None
 
 
@@ -65,16 +77,23 @@ class LLMWrapper:
         if self._model is not None:
             return self
 
+        is_large = is_large_model(self.model_id)
+
         self._model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
             dtype=self.torch_dtype,
             low_cpu_mem_usage=True,
             token=env.HF_TOKEN,
-        ).to(self.device)
+            device_map="auto" if is_large else None,
+            quantization_config=bnb_config if is_large else None
+        ) #.to(self.device)
+
+        if not is_large:
+            self._model.to(self.device)
 
         # Frozen, parameters should not accrue gradients, but still flow through.
         self._model.eval()
-        self._model.requires_grad(False)
+        self._model.requires_grad_(False)
 
         return self
 
@@ -86,7 +105,6 @@ class LLMWrapper:
             self._yn_cache = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-
 
     def __enter__(self) -> "LLMWrapper":
         return self.load()
@@ -151,7 +169,7 @@ class LLMWrapper:
 
     @staticmethod
     def assemble_inputs(
-            graph_embeds: torch.Tensor,
+            graph_embeds: Optional[torch.Tensor],
             prompt_embeds: torch.Tensor,
             graph_first: bool = True,
     ):
@@ -163,13 +181,16 @@ class LLMWrapper:
         :param graph_first: If true, graph tokens come first and thus the prompt attends to them under the causal mask. If false, the graph attends to the prompt.
         :return: input_embeds (1, total_len, llm_dim), attention_mask (1, total_len) <- all ones.
         """
-        g = graph_embeds.unsqueeze(0)  # (1, num_nodes, llm_dim)
         p = prompt_embeds.unsqueeze(0)  # (1, prompt_len, llm_dim)
+        if graph_embeds is not None:
+            g = graph_embeds.unsqueeze(0)  # (1, num_nodes, llm_dim)
 
-        input_embeds = torch.cat(
-            [g, p] if graph_first else [p, g],
-            dim=1
-        )  # (1, num_nodes + prompt_len, llm_dim)
+            input_embeds = torch.cat(
+                [g, p] if graph_first else [p, g],
+                dim=1
+            )  # (1, num_nodes + prompt_len, llm_dim)
+        else:
+            input_embeds = p
 
         attention_mask = torch.ones(
             1, input_embeds.size(1),
@@ -201,7 +222,7 @@ class LLMWrapper:
         def _run() -> "LLMOutputs":
             # noinspection PyCallingNonCallable
             outputs = self._model(
-                input_embeds = input_embeds,
+                inputs_embeds = input_embeds,
                 attention_mask = attention_mask,
                 output_hidden_states=True
             )
@@ -224,6 +245,8 @@ class LLMWrapper:
                 graph_hidden = graph_hidden,
                 last_token_hidden = last_token_hidden,
                 next_token_logits = next_token_logits,
+                input_embeds=input_embeds.detach(),
+                attention_mask=attention_mask.detach()
             )
         if inference:
             with torch.no_grad():
@@ -286,6 +309,8 @@ class LLMWrapper:
                 tokens = tokenizer.encode(v, add_special_tokens=False)
                 if len(tokens) == 1:
                     ids.add(tokens[0])
+                print(f"[{v}]", end=" ")
+            print("")
             return ids
 
         return _to_ids(yes_variants), _to_ids(no_variants)
@@ -335,6 +360,44 @@ class LLMWrapper:
         confidence = max(yes_prob, no_prob) / yn_total
         prediction = "yes" if yes_prob > no_prob else "no"
         return prediction, confidence, yn_total
+
+    @torch.no_grad()
+    def generate_text(
+            self,
+            input_embeds: torch.Tensor,
+            attention_mask: torch.Tensor,
+            tokenizer,
+            max_new_tokens: int = 250,
+            temperature: float = 0.0,
+    ):
+        """
+        Generate text output for qualitative inspection only.
+        Not used for training or evaluation. (But good to check none-the-less for a few cases)
+        :param input_embeds: (1, seq_len, llm_dim) from assemble_inputs(
+        :param attention_mask:  (1, seq_len)
+        :param tokenizer: A TokenizerFamily.tokenizer object
+        :param max_new_tokens: Generation length cap (default 250)
+        :param temperature: 0.0 = greedy decoding (deterministic, reproducible)
+        :return: Generated string, decoded from new tokens only (not the prompt)
+        """
+        self.require_loaded()
+        if input_embeds.dim() == 2:
+            input_embeds = input_embeds.unsqueeze(0)
+            # -> (1, seq_len, hidden_dim)
+
+        output_ids = self._model.generate(
+            inputs_embeds=input_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample = temperature > 0.0,
+            temperature = temperature if temperature > 0.0 else None,
+            pad_token_id = tokenizer.pad_token_id,
+        )
+
+        # output_ids includes the input: slice to new tokens only
+        new_tokens = output_ids[0, 1:]  # according to PR #21580
+        return new_tokens
+
 
 
 

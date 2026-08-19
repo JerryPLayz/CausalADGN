@@ -7,9 +7,10 @@ from torch_geometric.typing import Adj
 
 from .CADGNConv import CADGNConv
 from .graph_utils import *
+from .BaseEncoder import BaseEncoder
 
 
-class CADGNEncoder(nn.Module):
+class CADGNEncoder(BaseEncoder):
     """
     Weight-tied CA-DGN Encoder with dynamic depth (based on input graph diameter).
 
@@ -36,10 +37,11 @@ class CADGNEncoder(nn.Module):
             dropout: float = 0.0,
             *args, **kwargs
     ):
-        super(CADGNEncoder, self).__init__()
-
-        self.hidden_dim = hidden_dim
-        self.max_layers = max_layers
+        super(CADGNEncoder, self).__init__(
+            hidden_dim = hidden_dim,
+            max_layers = max_layers,
+            dropout=dropout
+        )
 
         self.conv = conv if conv is not None else CADGNConv(
             hidden_dim=hidden_dim,
@@ -55,38 +57,19 @@ class CADGNEncoder(nn.Module):
             assert hasattr(conv, 'hidden_dim'), "Injected Convolution must expose hidden_dim attribute"
             assert conv.hidden_dim == hidden_dim, f"Injected Convolution {conv.hidden_dim=} must match encoder hidden_dim {hidden_dim=}"
 
-        self.dropout = nn.Dropout(p=dropout) if dropout > 0.0 else nn.Identity()
-        self.norm = nn.LayerNorm(hidden_dim)
-
-    def forward(
+    def run_conv(
             self,
-            x: torch.Tensor,  # (num_nodes, hidden_dim)
-            edge_index: Adj,  # (2, num_edges)
-            batch: Optional[torch.Tensor] = None,  # (num_nodes, ) PyG batch vector; None= single graph
-            diameters: Optional[torch.Tensor] = None,  # (num_graphs, ) precomputed (should be)
+            x: torch.Tensor,
+            edge_index: Adj,
+            layer: int,
+            **kwargs
     ) -> torch.Tensor:
-        num_layers = batch_diameter(
+        return self.conv(
+            x=x,
             edge_index=edge_index,
-            num_nodes=x.size(0),
-            batch_vector=batch,
-            precomputed=diameters
+            layer=layer  # +1 occurs in forward()
         )
 
-        if self.max_layers is not None:
-            num_layers = min(num_layers, self.max_layers)
-
-        # Guard: always apply at least one layer
-        num_layers = max(num_layers, 1)
-
-        # Shared Convolution applied num_layer times
-
-        for layer_idx in range(num_layers):
-            #print(f"L[{layer_idx}] - {x.shape}")
-            x = self.conv(x=x, edge_index=edge_index, layer=layer_idx + 1)
-            #print(f"  - Pre Dropout: {x.shape}")
-            x = self.dropout(x)
-
-        return self.norm(x)
 
 
 class CADGNDecoder(nn.Module):

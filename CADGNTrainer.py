@@ -701,7 +701,7 @@ class CADGNTrainer:
                 # Validate
                 if val_dataloader is not None:
                     with self.profiler.section("S2 // Epoch (Vald)"):
-                        val_avg = self._eval_stage2(
+                        val_avg, _ = self._eval_stage2(
                             val_dataloader=val_dataloader,
                             config=config,
                             family=family,
@@ -762,7 +762,7 @@ class CADGNTrainer:
             llmw: Optional[LLMWrapper],
             yes_ids: set[int],
             no_ids: set[int],
-    ) -> dict[str, float]:
+    ) -> tuple[ dict[str, float], list[BaselineSampleResult]]:
         """
         Validation pass for Stage 2.
         Computes loss metrics (same as training), plus yes/no accuracy, confidence and yn_coverage diagnostics.
@@ -773,7 +773,7 @@ class CADGNTrainer:
         :param llmw: optional - a wrapper context containing the LLM to use for inference. If not provided, will be created (and load the family.model_id LLM into memory)
         :param yes_ids: from `llm.get_yn_token_sets()`
         :param no_ids:  from `llm.get_yn_token_sets()`
-        :return: dict of per-metric averages over validation samples.
+        :return: (dict of per-metric averages over validation samples. ;; list of BaselineSampleResults)
         """
         self.core.eval()
         family.eval()
@@ -917,5 +917,5 @@ class CADGNTrainer:
                 if key not in result:
                     result[key] = float("nan")
 
-        return result
+        return result, per_sample
 

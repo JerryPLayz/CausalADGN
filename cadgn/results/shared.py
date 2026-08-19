@@ -1,11 +1,11 @@
 import json
-from cadgn import BaselineSampleResult
+from . import BaselineSampleResult
 from pathlib import Path
-from typing import Union
+from typing import Union, List
 
 
 def save_sample_results(
-        results: list[BaselineSampleResult],
+        results: List[BaselineSampleResult],
         path: Union[str, Path],
         variant: str,
         epoch: int
@@ -41,3 +41,5 @@ def save_sample_results(
     fname = path / f"{variant}_{epoch:04d}_per_sample.json"
     with open(fname, "w") as f:
         json.dump(records, f, indent=4)
+
+

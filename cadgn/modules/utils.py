@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Union
 import gc
 import torch
+from collections import defaultdict
+import random
+
 
 
 def flush_gpu() -> None:
@@ -76,3 +79,6 @@ class Stage2Intermediates:
             Z_approx = Z_approx.detach(),
         )
 
+
+def is_large_model(model_id: str) -> bool:
+    return "-8B" in model_id

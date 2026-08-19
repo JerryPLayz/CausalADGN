@@ -1,6 +1,8 @@
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Self, Set
+from typing import Optional, Self, Set, List
+from collections import defaultdict
+import random
 
 import torch
 from torch.utils.data import DataLoader, Dataset, RandomSampler
@@ -28,6 +30,7 @@ class CLadderSample:
     story_id: int
     sample_id: int
     formal_form: str
+    reasoning: str
 
     @classmethod
     def from_row(cls,
@@ -48,6 +51,7 @@ class CLadderSample:
             story_id=row["story_id"],
             sample_id=int(row["id"]),
             formal_form=row.get("formal_form", ""),
+            reasoning=row.get("reasoning")
         )
 
 
@@ -140,6 +144,38 @@ class CLadderDataset(Dataset[CLadderSample]):
             stratify=strat_labels
         )
         return cls(train_samples), cls(val_samples)
+
+    def stratified_sample(self, n: int, key=lambda x: (x.rung, x.query_type)) -> List[CLadderSample]:
+        if n > len(self.samples):
+            raise ValueError(f"n ({n}) exceeds population size ({len(self.samples)})")
+        random.seed(42)
+        # Group into strata
+        strata: dict[tuple, list] = defaultdict(list)
+        for item in self.samples:
+            strata[key(item)].append(item)
+
+        total = len(self.samples)
+
+        # Proportional Allocation (floor pass)
+        alloc = []
+        allocated = 0
+        for key, group in strata.items():
+            exact = n * len(group) / total
+            floor = int(exact)
+            allocated += floor
+            alloc.append([exact-floor, key, group, floor])  # [remainder, ...]
+
+        # Distribute left over slots by largest remainder
+        leftover = n - allocated
+        alloc.sort(key=lambda x: x[0], reverse=True)
+
+        result = []
+        for i, (_, key, group, floor) in enumerate(alloc):
+            take = floor + (1 if i < leftover else 0)
+            take = min(take, len(group))  # guard against thin strata
+            result.extend(random.sample(group, take))
+        return result
+
 
 
 

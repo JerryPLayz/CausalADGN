@@ -12,6 +12,7 @@ from typing import Optional, Union, Any
 
 import torch
 import torch.nn as nn
+from . import BaseEncoder
 
 from .modules import CADGNEncoder, CADGNDecoder, GraphBuilder
 from .stager import Staged
@@ -58,7 +59,7 @@ class CADGNCore(nn.Module, Staged):
         }
 
         # conv is not exposed; CADGNEncoder instantiates it by default.
-        self.encoder = CADGNEncoder(
+        self.encoder: BaseEncoder = CADGNEncoder(
             hidden_dim=ca_dgn_dim,
             conv=None,
             max_layers=max_layers,

@@ -3,5 +3,5 @@ from .shared import *
 
 __all__ = [
     "BaselineSampleResult",
-    "save_sample_results"
+    "save_sample_results",
 ]
