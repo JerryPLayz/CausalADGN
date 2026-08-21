@@ -1,10 +1,10 @@
 from .modules import (CADGNEncoder, CADGNDecoder, CADGNConv,
                       GateClassifier, GraphBuilder, EncoderHead,
                       DecoderHead, graph_utils, Profiler, Projector,
-                      BaseEncoder)
+                      BaseEncoder, EarlyStopping)
 from .modules import RoPEDirectedNeighborhoodAggregation as RoPE_DNA
 from .module_utils import short_id, eval_and_save
-from .modules.utils import save_history, flush_gpu, Stage2Intermediates, is_large_model
+from .modules.utils import save_history, flush_gpu, Stage2Intermediates, is_large_model, get_device_of
 from .ModelCache import ModelCache
 from .llm_wrapper import *
 from .stager import Staged
@@ -44,6 +44,8 @@ __all__ = [
     "save_sample_results",
     "BaseEncoder",
     "eval_and_save",
-    "is_large_model"
+    "is_large_model",
+    "get_device_of",
+    "EarlyStopping"
 ]
 

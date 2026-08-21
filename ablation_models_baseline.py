@@ -15,12 +15,12 @@ import gc
 flush_gpu()
 gc.collect()
 
-epochs = 2
+epochs = 50
 
 do_models = [
-    #"Qwen/Qwen3-4B",
-    #"meta-llama/Llama-3.2-3B",
-    "meta-llama/Llama-3.1-8B",
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "Qwen/Qwen3-4B",
     "Qwen/Qwen3-8B",
 ]
 
@@ -131,3 +131,13 @@ for mdl in do_models:
             cls="baseline",
             prompt_samples=prompt_samples,
         )
+    print("Deconstructing model...")
+    del tokfam
+    del blt
+    del history, train_per_sample
+    del metrics, per_sample
+    del yes_ids, no_ids
+    flush_gpu()
+    gc.collect()
+
+

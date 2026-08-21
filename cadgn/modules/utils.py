@@ -6,7 +6,7 @@ import gc
 import torch
 from collections import defaultdict
 import random
-
+import torch.nn as nn
 
 
 def flush_gpu() -> None:
@@ -82,3 +82,15 @@ class Stage2Intermediates:
 
 def is_large_model(model_id: str) -> bool:
     return "-8B" in model_id
+
+
+def get_device_of(module: nn.Module) -> torch.device:
+    """Infer current device from first parameter or buffer. Falls back to CPU."""
+    try:
+        return next(module.parameters()).device
+    except StopIteration:
+        pass
+    try:
+        return next(module.buffers()).device
+    except StopIteration:
+        return torch.device("cpu")

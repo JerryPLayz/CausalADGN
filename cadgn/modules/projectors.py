@@ -16,17 +16,20 @@ class Projector(nn.Module):
         super().__init__()
         self.d_from = d_from
         self.d_to = d_to
-        self.expansion = expansion
+        self.expansion = 1  # NB: refactored to remove expansion as a factor here. (not parameter efficient)
         self.output_dtype = output_dtype
 
-        d_hidden = max(d_from, d_to) * expansion
+        d_hidden = max(d_from, d_to)
 
         self.proj = nn.Sequential(
             nn.Linear(d_from, d_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_hidden, d_to),
+            nn.Linear(d_hidden, d_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.LayerNorm(d_to),
+            nn.Linear(d_hidden, d_to),
         )
 
         self._init_weights()

@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from cadgn import Profiler, LLMWrapper, LLMOutputs, GateClassifier, Stage2Intermediates
 from torchmetrics.classification import MulticlassF1Score, BinaryF1Score
-from cadgn import BaselineSampleResult
+from cadgn import BaselineSampleResult, EarlyStopping
 
 
 @dataclass
@@ -33,6 +33,7 @@ class Stage1Config:
     # Training Loop
     epochs: int = 100
     grad_clip: float = 1.0  # 0.0 disables clipping
+    early_stopping_patience: int = 10
 
     # Top-Level Loss Weights
     w_nodes: float = 1.0   # node reconstruction
@@ -75,6 +76,7 @@ class Stage2Config:
     # Training Loop
     epochs: int = 100
     grad_clip: float = 1.0  # 0.0 disables clipping
+    early_stopping_patience: int = 10
 
     # Dataset sampling & Gradient Accumulation
     grad_accum_steps: int = 1  # 1 = batch-size of 1, (simulate larger batch-sizes for efficiency by calling `optimizer.step` on many independent samples at once.)
@@ -366,6 +368,11 @@ class CADGNTrainer:
         if pruning_callback is not None and val_dataloader is None:
             raise ValueError("pruning_callback requires val_dataloader to be provided: pruning decisions are based on val/loss.")
 
+        early_stopping = EarlyStopping(
+            patience=config.early_stopping_patience,
+            min_delta=1e-4,
+            mode="min",
+        )
         optimizer = self._build_stage1_optimizer(config=config)
         history: dict[str, list[float]] = {}
         print("Training Stage 1 for:")
@@ -423,6 +430,7 @@ class CADGNTrainer:
                 for k,v in val_avg.items():
                     epoch_avg[f"val/{k}"] = v
 
+
             for k,v in epoch_avg.items():
                 history.setdefault(k, []).append(v)
 
@@ -454,6 +462,11 @@ class CADGNTrainer:
 
             if pruning_callback is not None:
                 pruning_callback(epoch, val_loss)
+
+            if val_dataloader is not None and early_stopping.step(val_avg['loss'], epoch):
+                print(f"\t>> Early Stopping at epoch {epoch:>4d} | best: {early_stopping.best_epoch:>4d}")
+                break
+
         # end of epochs...
         if self.profiler.enabled:
             print(f"Profiler Summary:")
@@ -508,28 +521,12 @@ class CADGNTrainer:
         :param family: The LLM / TokenizerFamily to train for.
         :return: (dict: loss_dict, Tensor: pred_embeds (nodes), Tensor: pred_edge_logits (edges), Tensor: gate classifier logits, LLMOutputs, Stage2Intermediates: dataclass of intermediate (detached) tensors for evaluation)
         """
-        if llm is None:
-            raise RuntimeError("`llm` must be provided.")
-        if not llm.is_loaded:
-            raise RuntimeError("`llm` must be loaded either as context or directly via `llm.load()`")
-
-        edge_index = sample.data.edge_index.to(self.device)
-        node_texts = sample.node_names
-
-        with self.profiler.section("S2 // 1-candidate_pairs"):
-            candidate_pairs = _generate_candidate_pairs(
-                num_nodes=len(node_texts),
-                device=self.device
-            )
-
-        with self.profiler.section("S2 // 2-PreLLM"):
-            H, Z, embeds, attention_mask = self._stage1_p1(
-                family=family,
-                node_texts=node_texts,
-                edge_index=edge_index,
-            )
-            # intermediate_Z: (num_nodes, llm_dim) in llm_dtype
-            intermediate_Z = family.pre_projector(Z)
+        candidate_pairs, H, Z, embeds, attention_mask, intermediate_Z = self.generate_graph_embeds_s2(
+            sample=sample,
+            family=family,
+            llm=llm,
+            detached=False
+        )
 
         with self.profiler.section("S2 // 3-LLM"):
             prompt_embeds = llm.embed_prompt(sample.prompt, family.tokenizer, family.embed_layer, self.device)
@@ -546,7 +543,7 @@ class CADGNTrainer:
             llm_outputs = llm.forward(
                 input_embeds=input_embeds,
                 attention_mask=llm_mask,
-                num_nodes=len(node_texts),
+                num_nodes=len(sample.node_names),
                 graph_first=config.graph_first,
                 inference=inference,  # preserve computation graph for PreProjector (during .backwards())
             )
@@ -602,15 +599,27 @@ class CADGNTrainer:
 
         )
 
+    def _stage2_composite_metric(self, val_avg: dict) -> float:
+        """
+        Weights model performance between yes/no f1 score and gate f1 macro score.
+        This should provide a solid learning space.
+        :param val_avg:
+        :return:
+        """
+        yn = val_avg.get("yn_f1", 0.0)
+        gate = val_avg.get("gate_f1_macro", 0.0)
+        return 0.7 * yn + 0.3 * gate
+
     def train_stage2(
             self,
             config: Stage2Config,
             family: TokenizerFamily,
             train_dataloader: DataLoader[CLadderSample],
             val_dataloader: Optional[DataLoader[CLadderSample]],
+            llmw: LLMWrapper,
             checkpoint_dir: Optional[str | Path] = None,
             checkpoint_every: int = 10,
-            llmw: Optional[LLMWrapper] = None,
+
     ):
         """
         Trains Stage 2 across one family (llm) and the core.
@@ -625,6 +634,7 @@ class CADGNTrainer:
         :param llmw: If not None, this `LLMWrapper` will be used as context instead of
         :return: history; metric name -> list of per-epoch averages
         """
+        llmw.require_loaded()
         self.core.configure_stage2()
         family.configure_stage2()
 
@@ -632,125 +642,131 @@ class CADGNTrainer:
         history: dict[str, list[float]] = {}
         llm_dtype = DTYPE_MAP.get(family.__config__["llm_dtype"], torch.bfloat16)
 
-        ctx = (
-            nullcontext(llmw)
-            if llmw is not None
-            else LLMWrapper(
-                family.model_id,
-                device=self.device,
-                torch_dtype=llm_dtype,
-            )
+        early_stopping = EarlyStopping(
+            patience=config.early_stopping_patience,
+            min_delta=1e-4,
+            mode="max",
         )
+
+        llm = llmw
         print(f"Training Stage 2 for {family.model_id}:")
         # Context-load LLM via LLMWrapper to ensure proper disposal after training.
-        with ctx as llm:
-            yes_ids, no_ids = llm.get_yn_token_sets(family.tokenizer)
-            for epoch in range(config.epochs):
-                self.core.train()
-                family.train()
+
+        yes_ids, no_ids = llm.get_yn_token_sets(family.tokenizer)
+        for epoch in range(config.epochs):
+            self.core.train()
+            family.train()
 
 
-                epoch_metrics: dict[str, list[float]] = {}
-                optimizer.zero_grad()
+            epoch_metrics: dict[str, list[float]] = {}
+            optimizer.zero_grad()
 
-                with self.profiler.section("S2 // Epoch"):
+            with self.profiler.section("S2 // Epoch"):
 
-                    for step_idx, sample in enumerate(train_dataloader):
-                        with self.profiler.section("S2 // 00 - Step"):
-                            metrics, pred_node_embeds, pred_edge_logits, gate_cls_logits, llm_outputs, intermediates = self._stage2_step(sample=sample, config=config, family=family, llm=llm)
-                        # Gate Classifier Loss add
+                for step_idx, sample in enumerate(train_dataloader):
+                    with self.profiler.section("S2 // 00 - Step"):
+                        metrics, pred_node_embeds, pred_edge_logits, gate_cls_logits, llm_outputs, intermediates = self._stage2_step(sample=sample, config=config, family=family, llm=llm)
+                    # Gate Classifier Loss add
 
-                        metrics["L_gate"] = GateClassifier.calc_loss(
-                            gate_cls_logits=gate_cls_logits,
-                            rung_t=sample.rung,
-                            device=self.device,
-                        )
-                        metrics["loss"] = metrics["loss"] + metrics["L_gate"] * config.w_gate
-                        loss = metrics["loss"] / config.grad_accum_steps
-                        loss.backward()
+                    metrics["L_gate"] = GateClassifier.calc_loss(
+                        gate_cls_logits=gate_cls_logits,
+                        rung_t=sample.rung,
+                        device=self.device,
+                    )
+                    metrics["loss"] = metrics["loss"] + metrics["L_gate"] * config.w_gate
+                    loss = metrics["loss"] / config.grad_accum_steps
+                    loss.backward()
 
-                        is_accum_step = (step_idx + 1) % config.grad_accum_steps == 0
-                        is_last_step = (
-                            config.max_steps_per_epoch is not None
-                            and step_idx + 1 >= config.max_steps_per_epoch
-                        )
+                    is_accum_step = (step_idx + 1) % config.grad_accum_steps == 0
+                    is_last_step = (
+                        config.max_steps_per_epoch is not None
+                        and step_idx + 1 >= config.max_steps_per_epoch
+                    )
 
-                        if is_accum_step or is_last_step:
-                            if config.grad_clip > 0.0:
-                                nn.utils.clip_grad_norm_(
-                                    [
-                                        p for src in [self.core, family]
-                                        for p in src.parameters()
-                                        if p.requires_grad
-                                    ],
-                                    config.grad_clip
-                                )
-                            optimizer.step()
-                            optimizer.zero_grad()
-
-                        for k, v in metrics.items():
-                            epoch_metrics.setdefault(k, []).append(
-                                v.item() if isinstance(v, torch.Tensor) else v
+                    if is_accum_step or is_last_step:
+                        if config.grad_clip > 0.0:
+                            nn.utils.clip_grad_norm_(
+                                [
+                                    p for src in [self.core, family]
+                                    for p in src.parameters()
+                                    if p.requires_grad
+                                ],
+                                config.grad_clip
                             )
-                # Post-epoch
-                epoch_avg = {
-                    k: sum(v) / len(v)
-                    for k, v in epoch_metrics.items()
-                }
+                        optimizer.step()
+                        optimizer.zero_grad()
 
-                # Validate
-                if val_dataloader is not None:
-                    with self.profiler.section("S2 // Epoch (Vald)"):
-                        val_avg, _ = self._eval_stage2(
-                            val_dataloader=val_dataloader,
-                            config=config,
-                            family=family,
-                            llmw=llm,
-                            yes_ids=yes_ids,
-                            no_ids=no_ids,
+                    for k, v in metrics.items():
+                        epoch_metrics.setdefault(k, []).append(
+                            v.item() if isinstance(v, torch.Tensor) else v
                         )
-                        self.core.configure_stage2()
-                        family.configure_stage2()
-                        self.core.train()
-                        family.train()
+            # Post-epoch
+            epoch_avg = {
+                k: sum(v) / len(v)
+                for k, v in epoch_metrics.items()
+            }
 
-                    for k, v in val_avg.items():
-                        epoch_avg[f"val/{k}"] = v
+            # Validate
+            if val_dataloader is not None:
+                with self.profiler.section("S2 // Epoch (Vald)"):
+                    val_avg, _ = self._eval_stage2(
+                        val_dataloader=val_dataloader,
+                        config=config,
+                        family=family,
+                        llmw=llm,
+                        yes_ids=yes_ids,
+                        no_ids=no_ids,
+                    )
+                    #self.core.configure_stage2()
+                    #family.configure_stage2()
+                    self.core.train()
+                    family.train()
 
-                for k, v in epoch_avg.items():
-                    history.setdefault(k, []).append(v)
+                for k, v in val_avg.items():
+                    epoch_avg[f"val/{k}"] = v
 
-                if (
-                    checkpoint_dir is not None
-                    and (epoch + 1) % checkpoint_every == 0
-                ):
-                    root = Path(checkpoint_dir) / f"epoch_{epoch:04d}"
-                    self.core.save(path=root / "cadgn_core", model_id=f"{self.core.encoder.conv.__name__[:10]}-{self.core.encoder.hidden_dim}")
-                    safe_name = family.model_id.replace("/", "-")
-                    family.save(path=root / safe_name, model_id=family.model_id)
+            for k, v in epoch_avg.items():
+                history.setdefault(k, []).append(v)
 
-                # Print Epoch Statistics
+            if (
+                checkpoint_dir is not None
+                and (epoch + 1) % checkpoint_every == 0
+            ):
+                root = Path(checkpoint_dir) / f"epoch_{epoch:04d}"
+                self.core.save(path=root / "cadgn_core", model_id=f"{self.core.encoder.conv.__name__[:10]}-{self.core.encoder.hidden_dim}")
+                safe_name = family.model_id.replace("/", "-")
+                family.save(path=root / safe_name, model_id=family.model_id)
+
+            # Print Epoch Statistics
+            print(
+                f"Epoch {epoch:>4d} | "
+                f"Train Loss: {epoch_avg.get('loss', float('nan')):.6f}",
+                end=""
+            )
+            if val_dataloader is not None:
                 print(
-                    f"Epoch {epoch:>4d} | "
-                    f"Train Loss: {epoch_avg.get('loss', float('nan')):.6f}",
+                    f" | Val Loss: {epoch_avg.get('val/loss', float('nan')):.6f} | "
+                    f"Accuracy: {epoch_avg.get('val/accuracy', float('nan')):.4f}",
                     end=""
                 )
-                if val_dataloader is not None:
-                    print(
-                        f" | Val Loss: {epoch_avg.get('val/loss', float('nan')):.6f} | "
-                        f"Accuracy: {epoch_avg.get('val/accuracy', float('nan')):.4f}",
-                        end=""
-                    )
-                if self.profiler.enabled:
-                    print(
-                        f" | {self.profiler.get_latest_n('S2 // Epoch'):.2f}s"
-                    )
-                else:
-                    print("")
-            # end of epochs
             if self.profiler.enabled:
-                print(f"Profiler Summary:")
-                print(self.profiler.summary(sort_by="total"))
+                print(
+                    f" | {self.profiler.get_latest_n('S2 // Epoch'):.2f}s"
+                )
+            else:
+                print("")
+
+            if val_dataloader is not None:
+                monitor = self._stage2_composite_metric(val_avg)
+                if early_stopping.step(monitor, epoch):
+                    print(f"Early stopping at epoch {epoch} (best: {monitor} at {early_stopping.best_epoch})")
+                    break
+
+
+        # end of epochs
+        if self.profiler.enabled:
+            print(f"Profiler Summary:")
+            print(self.profiler.summary(sort_by="total"))
         return history
 
     @torch.no_grad()
@@ -803,7 +819,7 @@ class CADGNTrainer:
         gate_f1_macro = MulticlassF1Score(
             num_classes=3,
             average="macro",  # unweighted mean
-        )
+        ).to(device=self.device)
 
         # Yes/No macro (exclude abstain samples)
         yn_f1 = BinaryF1Score().to(device=self.device)
@@ -918,4 +934,42 @@ class CADGNTrainer:
                     result[key] = float("nan")
 
         return result, per_sample
+
+    def generate_graph_embeds_s2(
+            self,
+            sample: CLadderSample,
+            family: TokenizerFamily,
+            llm: LLMWrapper,
+            detached = True,
+    ):
+        if llm is None:
+            raise RuntimeError("`llm` must be provided.")
+        if not llm.is_loaded:
+            raise RuntimeError("`llm` must be loaded either as context or directly via `llm.load()`")
+
+        edge_index = sample.data.edge_index.to(self.device)
+        node_texts = sample.node_names
+
+        with self.profiler.section("S2 // 1-candidate_pairs"):
+            candidate_pairs = _generate_candidate_pairs(
+                num_nodes=len(node_texts),
+                device=self.device
+            )
+
+        with self.profiler.section("S2 // 2-PreLLM"):
+            H, Z, embeds, attention_mask = self._stage1_p1(
+                family=family,
+                node_texts=node_texts,
+                edge_index=edge_index,
+            )
+            # intermediate_Z: (num_nodes, llm_dim) in llm_dtype
+            intermediate_Z = family.pre_projector(Z)
+
+        if detached:
+            return tuple(
+                t.detach() for t in
+                (candidate_pairs, H, Z, embeds, attention_mask, intermediate_Z)
+            )
+        return candidate_pairs, H, Z, embeds, attention_mask, intermediate_Z
+
 

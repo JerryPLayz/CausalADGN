@@ -84,7 +84,7 @@ class LLMWrapper:
             dtype=self.torch_dtype,
             low_cpu_mem_usage=True,
             token=env.HF_TOKEN,
-            device_map="auto" if is_large else None,
+            device_map={"": self.device} if is_large else None,
             quantization_config=bnb_config if is_large else None
         ) #.to(self.device)
 
@@ -300,20 +300,21 @@ class LLMWrapper:
         :param tokenizer: HuggingFace tokenizer used for this family.
         :return: yes_ids (set[int] of all variants), no_ids (set[int] of all variants)
         """
-        yes_variants = ["yes", "Yes", "YES", " yes", " Yes", " YES"]
-        no_variants = ["no", "No", "NO", " no", " No", " NO"]
+        vocab: dict[str, int] = tokenizer.get_vocab()
+        yes_variants = {"yes", "Yes", "YES"}
+        no_variants = {"no", "No", "NO"}
 
-        def _to_ids(variants: list[str]) -> set[int]:
-            ids = set()
-            for v in variants:
-                tokens = tokenizer.encode(v, add_special_tokens=False)
-                if len(tokens) == 1:
-                    ids.add(tokens[0])
-                print(f"[{v}]", end=" ")
-            print("")
-            return ids
+        def _matches(token: str, targets: set[str]) -> bool:
+            stripped = token.lstrip("▁Ġ").strip()
+            return stripped in targets or token in targets
 
-        return _to_ids(yes_variants), _to_ids(no_variants)
+        yes_ids = {idx for token, idx in vocab.items() if _matches(token, yes_variants)}
+        no_ids = {idx for token, idx in vocab.items() if _matches(token, no_variants)}
+
+        print(f"yes_ids ({len(yes_ids)}): { {t for t, i in vocab.items() if i in yes_ids} }")
+        print(f"no_ids  ({len(no_ids)}):  { {t for t, i in vocab.items() if i in no_ids} }")
+
+        return yes_ids, no_ids
 
     def get_yn_token_sets(self, tokenizer) -> tuple[set[int], set[int]]:
         """
@@ -389,14 +390,15 @@ class LLMWrapper:
             inputs_embeds=input_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=1,
             do_sample = temperature > 0.0,
             temperature = temperature if temperature > 0.0 else None,
             pad_token_id = tokenizer.pad_token_id,
         )
-
+        #print(output_ids.shape)
         # output_ids includes the input: slice to new tokens only
-        new_tokens = output_ids[0, 1:]  # according to PR #21580
-        return new_tokens
+        #new_tokens = output_ids[0, 1:]  # according to PR #21580
+        return output_ids[0]
 
 
 

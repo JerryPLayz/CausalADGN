@@ -9,6 +9,7 @@ from .GraphBuilder import GraphBuilder
 from .heads import EncoderHead, DecoderHead
 from .projectors import Projector
 from .BaseEncoder import BaseEncoder
+from .EarlyStopping import EarlyStopping
 
 __all__ = [
     "CADGNConv",
@@ -23,6 +24,7 @@ __all__ = [
     "EncoderHead",
     "DecoderHead",
     "Projector",
-    "BaseEncoder"
+    "BaseEncoder",
+    "EarlyStopping"
 
 ]
