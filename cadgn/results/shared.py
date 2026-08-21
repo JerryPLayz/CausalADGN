@@ -23,18 +23,7 @@ def save_sample_results(
     path.mkdir(parents=True, exist_ok=True)
 
     records = [
-        {
-            "sample_id": r.sample_id,
-            "rung": r.rung,
-            "label": r.label,
-            "prediction": r.prediction,
-            "yn_correct": r.yn_correct,
-            "confidence": r.confidence,
-            "yn_coverage": r.yn_coverage,
-            "gate_pred": r.gate_pred,
-            "gate_correct": r.gate_correct,
-            "gate_logits": r.gate_logits,
-        }
+        r.to_dict()
         for r in results
     ]
 

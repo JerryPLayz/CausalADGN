@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Iterable, Optional, Callable, Literal
+from typing import Iterable, Optional, Callable, Literal, Any
 from contextlib import nullcontext
 
 #from cadgn.graph_utils import GraphBatch, _RequiredBatchFields
@@ -709,7 +709,7 @@ class CADGNTrainer:
             # Validate
             if val_dataloader is not None:
                 with self.profiler.section("S2 // Epoch (Vald)"):
-                    val_avg, _ = self._eval_stage2(
+                    val_avg, _, _ = self._eval_stage2(
                         val_dataloader=val_dataloader,
                         config=config,
                         family=family,
@@ -778,7 +778,8 @@ class CADGNTrainer:
             llmw: Optional[LLMWrapper],
             yes_ids: set[int],
             no_ids: set[int],
-    ) -> tuple[ dict[str, float], list[BaselineSampleResult]]:
+            do_save=False,
+    ) -> tuple[ dict[str, float], list[BaselineSampleResult], dict[str, Any]]:
         """
         Validation pass for Stage 2.
         Computes loss metrics (same as training), plus yes/no accuracy, confidence and yn_coverage diagnostics.
@@ -826,6 +827,9 @@ class CADGNTrainer:
         abstain_count = 0
         total_count = 0
 
+        dict_pred_embeds = []
+
+
         with ctx as llm:
             for step_idx, sample in enumerate(val_dataloader):
                 total_count += 1
@@ -836,6 +840,15 @@ class CADGNTrainer:
                     llm=llm,
                     inference=True
                 )
+
+                if do_save:
+                    dict_pred_embeds.append({
+                        "sample": sample.sample_id,
+                        "metrics": metrics,
+                        "pred_embeds": pred_embeds.detach(),
+                        "pred_logits": pred_edge_logits.detach(),
+                    })
+
 
                 # GateClassifier evaluation
                 L_gate = GateClassifier.calc_loss(
@@ -933,7 +946,7 @@ class CADGNTrainer:
                 if key not in result:
                     result[key] = float("nan")
 
-        return result, per_sample
+        return result, per_sample, dict_pred_embeds
 
     def generate_graph_embeds_s2(
             self,
