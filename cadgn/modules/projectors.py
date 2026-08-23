@@ -28,7 +28,7 @@ class Projector(nn.Module):
             nn.Linear(d_hidden, d_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.LayerNorm(d_to),
+            nn.LayerNorm(d_hidden),
             nn.Linear(d_hidden, d_to),
         )
 

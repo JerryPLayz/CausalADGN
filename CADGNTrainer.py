@@ -427,6 +427,12 @@ class CADGNTrainer:
             if val_dataloader is not None:
                 with self.profiler.section("S1 // Epoch (Vald)"):
                     val_avg = self._eval_stage1(val_dataloader=val_dataloader, config=config)
+                self.core.configure_stage1()
+                self.core.train()
+                for f in self.families:
+                    f.configure_stage1()
+                    f.train()
+
                 for k,v in val_avg.items():
                     epoch_avg[f"val/{k}"] = v
 
@@ -570,6 +576,27 @@ class CADGNTrainer:
 
         with self.profiler.section("S2 // 5-Loss"):
             # Primary loss here is MMD between Z_approx and Z.
+            stage1_loss = reconstruction_loss(
+                pred_node_embeds=pred_embeds,
+                true_node_embeds=embeds,
+                node_attention_mask=attention_mask,
+                edge_logits=pred_edge_logits,
+                candidate_pairs=candidate_pairs,
+                true_edge_index=sample.data.edge_index.to(self.device),
+                Z=Z,
+                H=H,
+
+                w_nodes=1.0,
+                w_edges=1.0,
+                w_norm= 0.01,
+                nodes_w_mse=1.0,
+                nodes_w_cosine=1.0,
+                auto_pos_weight=True,
+                norm_w_preserve=1.0,
+                norm_w_floor=1.0,
+                reduction='mean'
+            )["loss"]
+
             L_mmd = generalized_mmd_loss(
                 Z_dict={
                     "Z": Z.detach(),
@@ -579,7 +606,8 @@ class CADGNTrainer:
                 beta=config.mmd_beta,
             )
 
-            L_total = config.w_mmd * L_mmd
+            # primary loss for stage 2 is MMD across projectors and L_gate. Reconstruction is secondary, but also informative.
+            L_total = config.w_mmd * L_mmd + (stage1_loss * 0.2)
 
         return (
             {
@@ -658,6 +686,7 @@ class CADGNTrainer:
             family.train()
 
 
+
             epoch_metrics: dict[str, list[float]] = {}
             optimizer.zero_grad()
 
@@ -717,8 +746,8 @@ class CADGNTrainer:
                         yes_ids=yes_ids,
                         no_ids=no_ids,
                     )
-                    #self.core.configure_stage2()
-                    #family.configure_stage2()
+                    self.core.configure_stage2()
+                    family.configure_stage2()
                     self.core.train()
                     family.train()
 
@@ -845,8 +874,8 @@ class CADGNTrainer:
                     dict_pred_embeds.append({
                         "sample": sample.sample_id,
                         "metrics": metrics,
-                        "pred_embeds": pred_embeds.detach(),
-                        "pred_logits": pred_edge_logits.detach(),
+                        "pred_embeds": pred_embeds.detach().tolist(),
+                        "pred_logits": pred_edge_logits.detach().tolist(),
                     })
 
 

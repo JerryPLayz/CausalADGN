@@ -7,6 +7,7 @@ import numpy as np
 from scipy.stats import iqr, quantile
 
 import torch
+import statistics
 
 
 class Profiler:
@@ -65,13 +66,13 @@ class Profiler:
         Compute mean, std, min and max for each section
         All times are in seconds.
         """
-        import statistics
+
         result = {}
         for name, times in self._timings.items():
             n = len(times)
             result[name] = {
                 "mean": sum(times) / n,
-                "std": statistics.stdev(times) if n > 1 else 0.0,
+                "std": np.std(times) if n > 1 else 0.0,
                 "min": min(times),
                 "max": max(times),
                 "q1": quantile(times, 0.25),

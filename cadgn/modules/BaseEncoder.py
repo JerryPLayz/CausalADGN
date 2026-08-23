@@ -24,15 +24,7 @@ class BaseEncoder(nn.Module):
         self.dropout = nn.Dropout(p=dropout) if dropout > 0.0 else nn.Identity()
         self.norm = nn.LayerNorm(hidden_dim)
 
-        self._conv = nn.Identity()
-
-    @property
-    def conv(self) -> nn.Module:
-        return self._conv
-
-    @conv.setter
-    def conv(self, value: nn.Module) -> None:
-        self._conv = value
+        self.conv = nn.Identity()
 
     def run_conv(
             self,

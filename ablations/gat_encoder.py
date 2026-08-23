@@ -37,7 +37,7 @@ class GATEncoder(BaseEncoder):
             in_channels=hidden_dim,
             out_channels=head_dim,
             heads=num_heads,
-            droupout=dropout,
+            # droupout=dropout,
             concat=True,  # output: (num_nodes, num_heads * head_dim)
             add_self_loops=True,
             bias = True
