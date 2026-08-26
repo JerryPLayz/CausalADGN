@@ -186,7 +186,7 @@ class AnalysisReport:
                 "reject_h0": r.reject_h0,
                 "direction": r.direction,
                 "direction_int": r.direction_int,
-                "n_samples": r.samples,
+                "n_samples": r.n_samples,
                 "notes": r.notes,
             }
             for r in self.results
