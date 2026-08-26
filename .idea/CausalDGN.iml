@@ -4,6 +4,7 @@
     <content url="file:////wsl.localhost/Ubuntu/home/jerry/venvs/CausalADGN_venv/venv">
       <sourceFolder url="file:////wsl.localhost/Ubuntu/home/jerry/venvs/CausalADGN_venv/venv/bin" isTestSource="false" />
       <sourceFolder url="file:////wsl.localhost/Ubuntu/home/jerry/venvs/CausalADGN_venv/venv/lib/python3.11/site-packages" isTestSource="false" />
+      <sourceFolder url="file:////wsl.localhost/Ubuntu/home/jerry/venvs/CausalADGN_venv/venv/lib64/python3.11/site-packages/pytorch_lightning" isTestSource="false" />
     </content>
     <content url="file:////wsl.localhost/Ubuntu/usr/lib/python3.11">
       <sourceFolder url="file:////wsl.localhost/Ubuntu/usr/lib/python3.11" isTestSource="false" />

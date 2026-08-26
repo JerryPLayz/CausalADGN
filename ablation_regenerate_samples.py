@@ -82,7 +82,6 @@ train_d = train.as_dataloader(max_steps_per_epoch=550)
 val_d = vald.as_dataloader(max_steps_per_epoch=150, shuffle=False)
 
 complete_val = vald.as_dataloader(shuffle=False)
-prompt_samples: list[CLadderSample] = CLadderDataset(org_ds).stratified_sample(50)
 
 import numpy as np
 import pandas as pd
@@ -200,77 +199,7 @@ do_models = [
 model_ablations = ["cadgn", "adgn", "gcn", "gat", "dec"]
 
 
-def do_stage1():
-    for a_id, abl in enumerate(model_ablations):
-        backup_dir = save_path / abl / "stage1_backup_fams"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        for mmd_val in [0.0, 1.0]:
-            print(f"Starting Training for Stage 1 (ablation={abl}({a_id}), MMD Weight={mmd_val})")
-            s1c.w_mmd = mmd_val
-            mmd_str = f"mmd-{int(mmd_val)}"
-            inst = InProgressInstance.create(
-                    arch=arch,
-                    abl=abl,
-                    llm_models=do_models
-                )
-            # Train Stage 1 for all models (including across w_mmd=0/1)
-            with inst.cuda_stage1():
-                inst_trainer = CADGNTrainer(
-                    inst.core,
-                    inst.families,
-                    profile=True
-                )
-                history = inst_trainer.train_stage1(
-                    config=s1c,
-                    train_dataloader=train_d,
-                    val_dataloader=val_d,
-                )
-
-                save_history(history, f"./ablate_results/stage1_history/{a_id}_{abl}_stage1_history_{mmd_str}.csv")
-                # Evaluate over the full validation set and save base loss values (for the graphs, point of comparison)
-                inst.core.eval()
-                inst.core.configure_eval()
-                vald_d_recorded = []
-                for fam in inst.families:
-                    fam.eval()
-                    fam.configure_eval()
-
-                for step_idx, sample in enumerate(complete_val):
-                    metrics, pred_embeds_per_fam, pred_edge_logits_per_fam = inst_trainer._stage1_step(
-                        sample=sample,
-                        config=s1c,
-                    )
-                vald_d_recorded.append({
-                    "sample_id": sample.sample_id,
-                    "metrics": {k: safe_convert_tensor(v) for k, v in metrics.items()},
-                    "pred_embeds": {k: t.tolist() for k, t in pred_embeds_per_fam.items()},
-                    "pred_logits": {k: t.tolist() for k, t in pred_edge_logits_per_fam.items()},
-                    "order": [f.model_id for f in inst_trainer.families]
-                })
-
-            with open(stage1_output_graph_path / f"{a_id}_{abl}_all_{mmd_str}_s1-graph-preds.json", "w") as f:
-                json.dump(vald_d_recorded, f)
-            in_progress[int(mmd_val)].append(inst)
-            # Save the Core (as its frozen in Stage 2, this is it)
-            (save_path / inst.ablation).mkdir(parents=True, exist_ok=True)
-            inst.core.save(
-                path = save_path / inst.ablation,
-                model_id=mmd_str
-            )
-
-            for fam in inst.families:
-                safename = fam.model_id.replace("/", "__")
-                fam.save(
-                    path= backup_dir,
-                    model_id=f"inprogress_{safename}_{mmd_str}",
-                )
-            del inst_trainer
-            del vald_d_recorded
-        # EOL
-
-
-def gather_stage1() -> dict[int, list["InProgressInstance"]]:
+def gather_stage2() -> dict[int, list["InProgressInstance"]]:
     ls: dict[int, list["InProgressInstance"]] = {0: [], 1: []}
     for a_id, abl in enumerate(model_ablations):
         for mmd_val in [0.0, 1.0]:
@@ -288,18 +217,14 @@ def gather_stage1() -> dict[int, list["InProgressInstance"]]:
 
             for fam in inst.families:
                 safename = fam.model_id.replace("/", "__")
-                fam.load_state_dict(torch.load(save_path / abl / "stage1_backup_fams" / f"TokFam_inprogress_{safename}_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
+                fam.load_state_dict(torch.load(save_path / abl / f"TokFam_{safename}_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
 
             ls[int(mmd_val)].append(inst)
             print("\t>> Complete!")
     return ls
 
+abl_models = gather_stage2()
 
-in_progress = gather_stage1()
-#do_stage1()
-
-
-# # Stage 2 (careful memory management is painful to work with...)
 stage2_output_graph_path = Path("./ablate_results/samples/stage2/")
 stage2_output_graph_path.mkdir(parents=True, exist_ok=True)
 
@@ -307,8 +232,8 @@ for mdl in do_models:
     # Load the LLM
     with LLMWrapper(mdl) as llm:
         # Select elements to move to GPU
-        for mmd_int, insts in in_progress.items():
-            s2c.w_mmd = float(mmd_int)  # this is still relevant here: does including a reconstruction penalty improve performance vs just optimizing for gate_classifier?
+        for mmd_int, insts in abl_models.items():
+            evals2c.w_mmd = float(mmd_int)  # this is still relevant here: does including a reconstruction penalty improve performance vs just optimizing for gate_classifier?
             for inst in insts:
                 fams = inst.get_families_for_model(mdl)
                 assert len(fams) == 1, f"Expected exactly 1 family for {mdl}, got {len(fams)}"
@@ -316,36 +241,22 @@ for mdl in do_models:
                 with CudaDevice(inst.core, fam):
                     safename = fam.model_id.replace("/", "__")
                     print(f"Stage 2 | abl={inst.ablation} | mmd={mmd_int} | model={mdl}")
-                    stage2_trainer_i = CADGNTrainer(inst.core, [], profile=True, device="cuda")
-                    history_i = stage2_trainer_i.train_stage2(
-                        config=s2c,
-                        family=fam,
-                        train_dataloader=train_d,
-                        val_dataloader=val_d,
-                        llmw=llm
-                    )
-
-                    print("\t>> Saving History")
-
-                    save_history(
-                        history=history_i,
-                        path=f"./ablate_results/history/{inst.ablation}_{safename}_mmd-{mmd_int}_history.csv"
-                    )
-
                     print("\t>> Gathering Samples....")
                     yes_ids, no_ids = llm.get_yn_token_sets(fam.tokenizer)
-                    metrics, per_sample, dict_pred_embeds, = stage2_trainer_i._eval_stage2(
+                    trainer_i = CADGNTrainer(inst.core, [], profile=True, device="cuda")
+                    metrics, per_sample, dict_pred_embeds, = trainer_i._eval_stage2(
                         val_dataloader=complete_val,
-                        config=s2c,
+                        config=evals2c,
                         family=fam,
                         llmw=llm,
                         yes_ids=yes_ids,
                         no_ids=no_ids,
-                        do_save = True
+                        do_save=True
                     )
 
                     print("\t>> Saving Graph Embeds for future comparison...")
-                    with open(stage2_output_graph_path / f"{inst.ablation}_{safename}_{mmd_int}_s2-graph-preds.json", "w") as f:
+                    with open(stage2_output_graph_path / f"{inst.ablation}_{safename}_{mmd_int}_s2-graph-preds.json",
+                              "w") as f:
                         # json.dump({k: safe_convert_tensor(v) for k, v in dict_pred_embeds.items()}, f)
                         json.dump([{k: safe_convert_tensor(v) for k, v in d.items()} for d in dict_pred_embeds], f)
 
@@ -365,60 +276,6 @@ for mdl in do_models:
                         epoch=epochs,
                     )
 
-                    # this is an expensive process, only do it once for each of the mmd_val variants (max x4)
-                    if inst.ablation == "cadgn" or inst.ablation == "adgn":
-                        print("\t>> Handling Qualitative Gather...")
-
-                        o_texts = []
-                        output_path = Path("./ablate_results/output")
-                        output_path.mkdir(parents=True, exist_ok=True)
-
-                        for sample_idx, sample in enumerate(prompt_samples):
-
-                            input_embeds = llm.embed_prompt(
-                                prompt=sample.prompt,
-                                tokenizer=fam.tokenizer,
-                                embed_layer=fam.embed_layer,
-                                device=llm.device
-                            )
-
-                            _, _, _, _, _, graph_embeds = stage2_trainer_i.generate_graph_embeds_s2(
-                                sample=sample,
-                                family=fam,
-                                llm=llm,
-                                detached=True
-                            )
-
-                            input_embeds, attention_mask = llm.assemble_inputs(
-                                graph_embeds=graph_embeds,
-                                prompt_embeds=input_embeds,
-
-                            )
-
-                            token_ids = llm.generate_text(
-                                input_embeds=input_embeds,
-                                attention_mask=attention_mask,
-                                tokenizer=fam.tokenizer,
-                            )
-
-                            text = fam.tokenizer.decode(token_ids, skip_special_tokens=True)
-                            o_texts.append({
-                                "id": sample.sample_id,
-                                "rung": sample.rung,
-                                "llm_output": text,
-                                "prompt": sample.prompt,
-                                "query_type": sample.query_type,
-                                "reasoning": sample.reasoning,
-                                "formal_form": sample.formal_form
-                            })
-
-                        o_texts = pd.DataFrame(o_texts)
-                        o_texts.to_csv(f"./ablate_results/output/{inst.ablation}_{safename}_mmd-{mmd_int}_qual.csv")
-                        print("\t>> Saved Qualitative Data!")
-                    # EOIF
-                    # Save to disk
-                    (save_path / inst.ablation).mkdir(parents=True, exist_ok=True)
-                    fam.save(
-                        path=save_path / inst.ablation,
-                        model_id=f"{safename}_mmd-{mmd_int}"
-                    )
+                del metrics, per_sample, dict_pred_embeds, yes_ids, no_ids
+                gc.collect()
+                flush_gpu()

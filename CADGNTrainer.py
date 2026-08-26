@@ -18,6 +18,14 @@ from cadgn import Profiler, LLMWrapper, LLMOutputs, GateClassifier, Stage2Interm
 from torchmetrics.classification import MulticlassF1Score, BinaryF1Score
 from cadgn import BaselineSampleResult, EarlyStopping
 
+def safe_convert_tensor(tensor: torch.Tensor) -> Any:
+    if isinstance(tensor, torch.Tensor):
+        if tensor.numel() == 1:
+            return tensor.item()
+        else:
+            return tensor.tolist()
+    else:
+        return tensor
 
 @dataclass
 class Stage1Config:
@@ -607,7 +615,7 @@ class CADGNTrainer:
             )
 
             # primary loss for stage 2 is MMD across projectors and L_gate. Reconstruction is secondary, but also informative.
-            L_total = config.w_mmd * L_mmd + (stage1_loss * 0.2)
+            L_total = config.w_mmd * L_mmd + (stage1_loss * 0.3)
 
         return (
             {
@@ -873,7 +881,7 @@ class CADGNTrainer:
                 if do_save:
                     dict_pred_embeds.append({
                         "sample": sample.sample_id,
-                        "metrics": metrics,
+                        "metrics": {k: safe_convert_tensor(v) for k,v in metrics.items()},
                         "pred_embeds": pred_embeds.detach().tolist(),
                         "pred_logits": pred_edge_logits.detach().tolist(),
                     })

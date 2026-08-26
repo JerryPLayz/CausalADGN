@@ -28,6 +28,9 @@ To ensure we don't over-estimate support, we employ the Holm-Bonferroni correcti
 
 
 from __future__ import annotations
+
+from collections import defaultdict
+
 import json
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -46,6 +49,50 @@ try:
     _DEEPSIG_AVAILABLE = True
 except ImportError:
     _DEEPSIG_AVAILABLE = False
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
+
+mp.set_start_method("spawn", force=True)
+
+
+# Just something to try to speed this up.... Its painfully slow...
+_worker_variants: list[VariantResults] | None = None
+_worker_variants_aso: list[VariantResults] | None = None
+
+
+def _init_worker(variants: list[VariantResults]) -> None:
+    global _worker_variants
+    _worker_variants = variants
+
+
+def _init_worker_aso(variants: list[VariantResults]) -> None:
+    global _worker_variants_aso
+    _worker_variants_aso = variants
+
+
+def _stuart_maxwell_worker(args: tuple[int, int]) -> tuple[int, int, float, float, str, int, int, str]:
+    i, j = args
+    stat, pval, direction, direction_int, n, notes = _stuart_maxwell_pair(
+        _worker_variants[i],
+        _worker_variants[j],
+    )
+    return i, j, stat, pval, direction, direction_int, n, notes
+
+
+def _aso_worker(
+        args: tuple[int, int, str, float, int]
+) -> tuple[int, int, str, float, str, int, int, str]:
+    i, j, metric, confidence, seed = args
+    eps, direction, direction_int, n, notes = _aso_pair(
+        _worker_variants_aso[i],
+        _worker_variants_aso[j],
+        metric=metric,
+        confidence=confidence,
+        seed=seed,
+        num_jobs=1,  # disable internal parallelism, outer pool handles it
+    )
+    return i, j, metric, eps, direction, direction_int, n, notes
 
 
 @dataclass
@@ -138,6 +185,7 @@ class AnalysisReport:
                 "p_value_corr": r.p_value_corr,
                 "reject_h0": r.reject_h0,
                 "direction": r.direction,
+                "direction_int": r.direction_int,
                 "n_samples": r.samples,
                 "notes": r.notes,
             }
@@ -293,8 +341,9 @@ def _mcnemar_pair(
         notes = f"exact test (b+c={bc}<25)"
 
     result = sm_mcnemar(table, exact=use_exact, correction= not use_exact)
+    #print(result)
     statistic = float(result.statistic)
-    p_value = float(result.p_value)
+    p_value = float(result.pvalue)
 
     # Direction
     acc_a = correct_a.mean()
@@ -493,7 +542,7 @@ def run_analysis(
         aso_confidence: float = 0.95,
         aso_tau: float = 0.5,
         aso_seed: int = 42,
-        aso_num_jobs: int = 1,
+        num_cpus: int = 15,
         continuous_metrics: Optional[List] = None
 ) -> AnalysisReport:
     """
@@ -522,3 +571,127 @@ def run_analysis(
     n_pairs = len(pairs)
 
     # 1. McNemar (binary yn_correct)
+    print(f"\t>>> 1 | Starting McNemar Pairwise Testing...")
+    mcnemar_results: list[PairwiseResult] = []
+    for idx, (i, j) in enumerate(pairs):
+        if idx % 100 == 0:
+            print(f"\t\t{idx}/{n_pairs}...")
+        va, vb = variants[i], variants[j]
+        stat, pval, direction, direction_int, n, notes = _mcnemar_pair(va, vb)
+        mcnemar_results.append(PairwiseResult(
+            variant_a=va.name, variant_b=vb.name,
+            test="mcnemar",
+            metric="yn_correct",
+            statistic=stat,
+            p_value=pval,
+            p_value_corr=None,
+            reject_h0=False,
+            direction=direction,
+            direction_int=direction_int,
+            n_samples=n,
+            notes=notes,
+        ))
+    _apply_holm_bonferroni(mcnemar_results, alpha)
+
+
+    # 2. Stuart-Maxwell (3-class gate_pred)
+    print(f"\t>>> 2 | Starting Stuart-Maxwell Pairwise Testing... ({n_pairs} pairs)")
+    sm_results: list[PairwiseResult] = []
+    n_workers = min(num_cpus, mp.cpu_count())
+    completed = 0
+
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        initializer=_init_worker,
+        initargs=(variants,)
+    ) as executor:
+        futures = {
+            executor.submit(_stuart_maxwell_worker, (i, j)): (i, j)
+            for i, j in pairs
+        }
+        for future in as_completed(futures):
+            i, j, stat, pval, direction, direction_int, n, notes = future.result()
+            va, vb = variants[i], variants[j]
+            sm_results.append(PairwiseResult(
+                variant_a=va.name,
+                variant_b=vb.name,
+                test="stuart_maxwell",
+                metric="gate_pred",
+                statistic=stat,
+                p_value=pval,
+                p_value_corr=None,
+                reject_h0=False,
+                direction=direction,
+                direction_int=direction_int,
+                n_samples=n,
+                notes=notes,
+            ))
+            completed += 1
+            if completed % 100 == 0:
+                print(f"\t\t{completed}/{n_pairs}...")
+        # EOL
+    # EOExec
+    _apply_holm_bonferroni(sm_results, alpha)
+
+    # 3. ASO (continuous metrics)
+    aso_results: list[PairwiseResult] = []
+    if not _DEEPSIG_AVAILABLE:
+        print("\nWARNING: `deepsig` not installed, ASO tests skipped.\n")
+    else:
+        print(f"\t>>> 3 | Starting ASO Pairwise Testing...")
+        # Build all tasks upfront: one per (pair, metric) combination
+        all_tasks: list[tuple[int, int, str, float, int]] = [
+            (i, j, metric, aso_confidence, aso_seed)
+            for metric in continuous_metrics
+            for i, j in pairs
+        ]
+        n_tasks = len(all_tasks)
+        completed = 0
+
+        # Accumulate per-metric for Holm-Bonferroni (applied per metric)
+        metric_buckets: defaultdict[str, list[PairwiseResult]] = defaultdict(list)
+
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_init_worker_aso,
+            initargs=(variants,)
+        ) as executor:
+            futures = {
+                executor.submit(_aso_worker, task): task
+                for task in all_tasks
+            }
+            for future in as_completed(futures):
+                i, j, metric, eps, direction, direction_int, n, notes = future.result()
+                va, vb = variants[i], variants[j]
+                metric_buckets[metric].append(PairwiseResult(
+                    variant_a=va.name,
+                    variant_b=vb.name,
+                    test="aso",
+                    metric=metric,
+                    statistic=eps,
+                    p_value=None,
+                    p_value_corr=None,
+                    reject_h0=(
+                            not np.isnan(eps) and eps < aso_tau
+                    ),
+                    direction=direction,
+                    direction_int=direction_int,
+                    n_samples=n,
+                    notes=notes,
+                ))
+                completed += 1
+                if completed % 100 == 0:
+                    print(f"\t\t{completed}/{n_tasks}...")
+        # Flatten in metric order (preserves original structure)
+        for metric in continuous_metrics:
+            aso_results.extend(metric_buckets[metric])
+    print(f"\t >>> Process Complete!")
+    all_results = mcnemar_results + sm_results + aso_results
+
+    return AnalysisReport(
+        results=all_results,
+        alpha=alpha,
+        n_tests_mcnemar=len(mcnemar_results),
+        n_tests_stuart_maxwell=len(sm_results),
+        n_tests_aso=len(aso_results),
+    )
