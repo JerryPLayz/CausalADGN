@@ -614,6 +614,7 @@ class CADGNTrainer:
                 beta=config.mmd_beta,
             )
 
+
             # primary loss for stage 2 is MMD across projectors and L_gate. Reconstruction is secondary, but also informative.
             L_total = config.w_mmd * L_mmd + (stage1_loss * 0.3)
 
@@ -710,7 +711,19 @@ class CADGNTrainer:
                         rung_t=sample.rung,
                         device=self.device,
                     )
-                    metrics["loss"] = metrics["loss"] + metrics["L_gate"] * config.w_gate
+
+                    # Loss for Yes/No (primary signal: x2)
+                    # (still attached during training)
+                    L_yn = LLMWrapper.yn_loss(
+                        llm_outputs.next_token_logits,
+                        yes_ids=yes_ids,
+                        no_ids=no_ids,
+                        label=int(sample.label == "yes"),
+                        device=llmw.device,
+                    )
+                    metrics["L_yn"] = L_yn.detach()
+
+                    metrics["loss"] = metrics["loss"] + (metrics["L_gate"] * config.w_gate) + (L_yn * 2)
                     loss = metrics["loss"] / config.grad_accum_steps
                     loss.backward()
 

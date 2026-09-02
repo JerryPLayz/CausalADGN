@@ -42,58 +42,6 @@ class RoPEDirectedNeighborhoodAggregation(MessagePassing):
         nn.init.ones_(self.alpha_cause)
         nn.init.ones_(self.alpha_effect)
 
-
-
-    def debug_get_skew_symmetric_matrix(self, layer: int, alpha: torch.Tensor):
-        """
-        Explicitly constructs the block-diagonal skew-symmetric matrix \Omega^(l).
-        Each 2x2 block along the diagonal is a skew-symmetric matrix:
-            \Theta_i^(l) * J = [[0,              -\Theta_i^(l)],
-                                [\Theta_i^(l),   0            ]]
-        Satisfies: \Omega + \Omega^T = 0   (skew symmetry)
-        Guarantees: exp(\Omega) is orthogonal
-
-        Note: this method is for verification and logging only.
-        apply_rotation() should be used in practice, rather than constructing this expensive matrix on every forward.
-        :param layer:
-        :param alpha:
-        :return: Omega -> (hidden_dim, hidden_dim) skew-symmetric matrix
-        """
-        d = self.hidden_dim
-        #   See RoFormer P3.3                   (-2 * i) / d
-        theta_i = layer * alpha * (self.base ** (-2.0 * self.freq_indices / d)) ## TODO: check this formulation is correct
-        Omega = torch.zeros(d,d, device=theta_i.device, dtype=theta_i.dtype)
-        even_idx = torch.arange(0, d, 2, device=theta_i.device)  # [0, 2, 4, ..., d-2]
-        odd_idx = torch.arange(1, d, 2, device=theta_i.device)   # [1, 3, 5, ..., d-1]
-
-        # Upper Triangle: -theta_i at position (2i, 2i+1)
-        # Lower Triangle: theta_i at position (2i+1, 2i)
-        # Together, these enforce Omega = -Omega^T exactly.
-        Omega[even_idx, odd_idx] = -theta_i   # positions (0,1), (2,3), ... -> -theta_i
-        Omega[odd_idx, even_idx] = theta_i    # positions (1,0), (3,2), ... -> theta_i
-
-        # NB: use Omega in exp(Omega) => ( (cos theta_i,  -sin theta_i), (sin theta_i, cos theta_i))
-        return Omega
-
-    def verify_skew_symmetry(self, layer: int, skew_ok: float = 1e-6):
-        """
-        A utility to call during debugging to confirm that skew-symmetry holds.
-        :param layer: integer for the layer to test
-        :return: dict
-        """
-        with torch.no_grad():
-            Omega_c = self.debug_get_skew_symmetric_matrix(layer, alpha=self.alpha_cause)
-            Omega_e = self.debug_get_skew_symmetric_matrix(layer, alpha=self.alpha_effect)
-            err_c = (Omega_c + Omega_c.t()).abs().max().item()
-            err_e = (Omega_e + Omega_e.t()).abs().max().item()
-            return {
-                "layer": layer,
-                "cause_max_error": err_c,  # should be ~0.0
-                "effect_max_error": err_e,  # should be ~0.0
-                "cause_skew_ok": err_c < skew_ok,
-                "effect_skew_ok": err_c < skew_ok,
-            }
-
     def apply_rotation(self,
                        x: torch.Tensor,     # (num_nodes, hidden_dim)
                        layer: int,

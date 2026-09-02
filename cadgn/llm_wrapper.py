@@ -1,10 +1,14 @@
 from __future__ import annotations
+
+import gc
+
 from dataclasses import dataclass
 from torch.nn import Module
 from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 import env
 from .modules.utils import is_large_model
@@ -34,7 +38,7 @@ class LLMOutputs:
     last_token_hidden: torch.Tensor
     input_embeds: torch.Tensor
     attention_mask: torch.Tensor
-    next_token_logits: Optional[torch.Tensor] = None
+    next_token_logits: torch.Tensor
 
 
 # noinspection bad-assignment
@@ -67,6 +71,7 @@ class LLMWrapper:
         self.layer_index = layer_index
         self._model: Optional[nn.Module] = None
         self._yn_cache: Optional[tuple[set[int], set[int]]] = None
+        self._lm_head: Optional[nn.Module] = None
 
     def load(self) -> "LLMWrapper":
         """
@@ -95,6 +100,8 @@ class LLMWrapper:
         self._model.eval()
         self._model.requires_grad_(False)
 
+        self._lm_head = self._model.get_output_embeddings()
+
         return self
 
     def unload(self) -> None:
@@ -103,8 +110,10 @@ class LLMWrapper:
             del self._model
             self._model = None
             self._yn_cache = None
+            self._lm_head = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            gc.collect()
 
     def __enter__(self) -> "LLMWrapper":
         return self.load()
@@ -122,6 +131,9 @@ class LLMWrapper:
                 "LLMWrapper: model is not loaded!"
                 " Call load() or use a context manager!"
             )
+
+        if self._lm_head is None:
+            self._lm_head = self._model.get_output_embeddings()
 
     @staticmethod
     def apply_yn_suffix(
@@ -234,11 +246,9 @@ class LLMWrapper:
             graph_hidden = self._extract_graph_hidden(hidden, num_nodes, graph_first)
             last_token_hidden = self._extract_last_token_hidden(hidden)
 
-            next_token_logits = None
-            if inference:
-                lm_head = self._model.get_output_embeddings()
-                next_token_logits = lm_head(last_token_hidden)
-                # (vocab_size,)
+            #if inference:
+            next_token_logits = self._lm_head(last_token_hidden)
+            # (vocab_size,)
 
             return LLMOutputs(
                 hidden_states = hidden,
@@ -361,6 +371,23 @@ class LLMWrapper:
         confidence = max(yes_prob, no_prob) / yn_total
         prediction = "yes" if yes_prob > no_prob else "no"
         return prediction, confidence, yn_total
+
+    @staticmethod
+    def yn_loss(
+            logits: torch.Tensor,  # (vocab_size,) must retain grad
+            yes_ids: set[int],
+            no_ids: set[int],
+            label: int,  # 1 = yes, 0 = no
+            device: torch.device,
+            eps: float = 1e-8,
+    ) -> torch.Tensor:
+        probs = torch.softmax(logits.float(), dim=-1)
+        yes_prob = probs[list(yes_ids)].sum()  # scalar tensor, grad retained
+        no_prob = probs[list(no_ids)].sum()  # scalar tensor, grad retained
+        yn_total = (yes_prob + no_prob).clamp(min=eps)
+        p_yes_norm = yes_prob / yn_total  # normalised p(yes | yes or no)
+        target = torch.tensor(float(label), device=device)
+        return F.binary_cross_entropy(p_yes_norm, target)
 
     @torch.no_grad()
     def generate_text(
