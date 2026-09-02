@@ -80,7 +80,7 @@ train, vald = CLadderDataset.from_samples_split(
 train_d = train.as_dataloader(max_steps_per_epoch=550)
 val_d = vald.as_dataloader(max_steps_per_epoch=150, shuffle=False)
 
-complete_val = vald.as_dataloader()
+complete_val = vald.as_dataloader(shuffle=False)
 prompt_samples: list[CLadderSample] = CLadderDataset(org_ds).stratified_sample(50)
 
 
