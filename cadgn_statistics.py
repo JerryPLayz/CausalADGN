@@ -81,9 +81,9 @@ def _stuart_maxwell_worker(args: tuple[int, int]) -> tuple[int, int, float, floa
 
 
 def _aso_worker(
-        args: tuple[int, int, str, float, int]
+        args: tuple[int, int, str, float, int, int]
 ) -> tuple[int, int, str, float, str, int, int, str]:
-    i, j, metric, confidence, seed = args
+    i, j, metric, confidence, seed, n_pairs = args
     eps, direction, direction_int, n, notes = _aso_pair(
         _worker_variants_aso[i],
         _worker_variants_aso[j],
@@ -91,6 +91,7 @@ def _aso_worker(
         confidence=confidence,
         seed=seed,
         num_jobs=1,  # disable internal parallelism, outer pool handles it
+        n_pairs=n_pairs
     )
     return i, j, metric, eps, direction, direction_int, n, notes
 
@@ -307,7 +308,8 @@ def _mcnemar_pair(
     A incorrect     n10 (c)       n11
     Test statistic: chi2 = (b - c)^2 / (b+c)
     (with continuity correction when b+c >= 25)
-    Exact binomial when b+c < 25 (as recommended by Dietterich, 1998)
+    Exact binomial when b+c < 25 (Kübler et al., 2026; Dietterich, 1998)
+    Per-Sample empirical variance when b+c >= 25 (Kübler et al., 2026 eq. 8-10)
     :param va:
     :param vb:
     :return: (statistic, p_value, direction, direction_int, n_samples, notes)
@@ -336,14 +338,27 @@ def _mcnemar_pair(
         return 0.0, 1.0, "no difference", 0, n_samples, "b+c=0: perfect agreement"
 
     # Auto-Select Exact vs Chi-Squared
-    use_exact = bc < 25
-    if use_exact:
-        notes = f"exact test (b+c={bc}<25)"
+    if bc < 25:
+        # Exact binomial, as per Kübler et al. recommendation
+        result = sm_mcnemar(table, exact=True, correction=False)
+        statistic = float(result.statistic)
+        p_value = float(result.pvalue)
+        notes = f"exact binomial (b+c={bc} < 25)"
+    else:
+        # Per-sample empirical variance, from Kübler et al. eq. 8-10
+        # D(x_i) in {-1, 0, 1}: replaces null-restricted (b+c)/N variance
+        d = correct_a - correct_b
+        n = len(d)
+        var_emp = np.var(d, ddof=1)
 
-    result = sm_mcnemar(table, exact=use_exact, correction= not use_exact)
-    #print(result)
-    statistic = float(result.statistic)
-    p_value = float(result.pvalue)
+        if var_emp == 0:
+            statistic, p_value = 0.0, 1.0
+            notes = f"zero empirical variance (b+c={bc})"
+        else:
+            z = d.mean() / np.sqrt(var_emp / n)
+            statistic = float(z ** 2)
+            p_value = float(chi2.sf(statistic, df=1))
+            notes = f"per-sample asymptotic (b+c={bc} >= 25)"
 
     # Direction
     acc_a = correct_a.mean()
@@ -399,7 +414,7 @@ def _stuart_maxwell_pair(
         return 0.0, 1.0, "no difference", 0, n_samples, "empty contingency table"
 
     sq = SquareTable(table)
-    result = sq.symmetry()  # Stuart-Maxwell test
+    result = sq.homogeneity()  # Stuart-Maxwell test
 
     statistic = float(result.statistic)
     p_value = float(result.pvalue)
@@ -417,7 +432,7 @@ def _stuart_maxwell_pair(
         direction = "no difference"
         direction_int = 0
 
-    notes = f"df={n_classes * (n_classes - 1) // 2}, n={n_samples}"
+    notes = f"SM Mrgnl Homogeneity, df={n_classes - 1}, n={n_samples}"
     return statistic, p_value, direction, direction_int, n_samples, notes
 
 
@@ -428,22 +443,23 @@ def _aso_pair(
         confidence: float = 0.95,
         seed: int = 42,
         num_jobs: int = 1,
+        n_pairs: int = 1,
 ) -> tuple[float, str, int, int, str]:
     """
     Almost Stochastic Order test for a continuous metric.
     ASO computes epsilon_mind, an upper bound on the violation of stochastic dominance of A over B.
 
-    Interpretation:
+    Interpretation for aso(a,b):
         epsilon_min < 0.5: A stochastically dominates B
-        epsilon_max ~ 0.5: No dominance (distributions are equivalent)
-        epsilon_min > 0.5: B stochastically dominates A
+        epsilon_min >= 0.5: A does not dominate B (B dominance over A requires separate aso(b,a) call)
     Rejection criteria:
         Reject H0 (epsilon_min >= tau) when epsilon_min < tau.
 
     Consult:
-        del barrio et al. (2017) "Optimal transport and robust statistics"
+        Del Barrio, E., Cuesta-Albertos, J. A., & Matrán, C. (2018). An optimal transportation approach for assessing almost stochastic order. In The Mathematics of the Uncertain, Springer, pp. 33–44.
+
         Dror et al. (2019) "Deep Dominance - How to properly compare DNN models"
-        Ulmer et al. (2022) "Deep Significance"
+        Ulmer et al. (2022) "Deep Significance - Easy and Meaningful Statistial Significance Testing in the Age of Neural Networks"
     :param va:
     :param vb:
     :param metric:
@@ -481,6 +497,7 @@ def _aso_pair(
         confidence_level=confidence,
         num_jobs=num_jobs,
         seed=seed,
+        num_comparisons=n_pairs,
     ))
 
     mean_a = float(scores_a.mean())
@@ -490,13 +507,12 @@ def _aso_pair(
         direction = f"A > B (mean: {mean_a:.4f} > {mean_b:.4f}, eps={eps_min:.4f})"
         direction_int = 1
     else:
-        direction = f"B >= A (mean: {mean_b:.4f} > {mean_a:.4f}, eps={eps_min:.4f})"
-        direction_int = -1
+        direction = f"no dominance ({eps_min:.4f})"
+        direction_int = 0
 
     notes = (
         f"confidence={confidence}, n_valid={n_valid}/{n_samples}. "
-        f"Report epsilon_min and confidence level. "
-        f"Reject H0 (no dominance) when eps_min < 0.5."
+        f"Reject H0 when eps_min < tau. Report epsilon_min and confidence level."
     )
     return eps_min, direction, direction_int, n_samples, notes
 
@@ -640,8 +656,8 @@ def run_analysis(
     else:
         print(f"\t>>> 3 | Starting ASO Pairwise Testing...")
         # Build all tasks upfront: one per (pair, metric) combination
-        all_tasks: list[tuple[int, int, str, float, int]] = [
-            (i, j, metric, aso_confidence, aso_seed)
+        all_tasks: list[tuple[int, int, str, float, int, int]] = [
+            (i, j, metric, aso_confidence, aso_seed, n_pairs)
             for metric in continuous_metrics
             for i, j in pairs
         ]
@@ -695,3 +711,4 @@ def run_analysis(
         n_tests_stuart_maxwell=len(sm_results),
         n_tests_aso=len(aso_results),
     )
+

@@ -13,7 +13,7 @@ import gc
 
 from typing import Union, Any
 from pathlib import Path
-import json
+import json, base64, array
 from collections import defaultdict
 
 # Unfortunately, the current implementation precludes saving modified versions of the various modules (config is static)
@@ -49,7 +49,7 @@ s1c = Stage1Config(
     max_steps_per_epoch=550,
     max_steps_per_epoch_val=150,
     w_mmd=1.0,
-    epochs=epochs
+    epochs=60
 )
 
 s2c = Stage2Config(
@@ -194,7 +194,7 @@ save_path.mkdir(parents=True, exist_ok=True)
 do_models = [
     #"Qwen/Qwen3-4B",
     #"meta-llama/Llama-3.2-3B-Instruct",
-    #"Qwen/Qwen3-8B",
+    "Qwen/Qwen3-8B",
     "meta-llama/Llama-3.1-8B-Instruct"
 ]
 model_ablations = ["cadgn", "adgn", "gcn", "gat", "dec"]
@@ -241,13 +241,13 @@ def do_stage1():
                         sample=sample,
                         config=s1c,
                     )
-                vald_d_recorded.append({
-                    "sample_id": sample.sample_id,
-                    "metrics": {k: safe_convert_tensor(v) for k, v in metrics.items()},
-                    "pred_embeds": {k: t.tolist() for k, t in pred_embeds_per_fam.items()},
-                    "pred_logits": {k: t.tolist() for k, t in pred_edge_logits_per_fam.items()},
-                    "order": [f.model_id for f in inst_trainer.families]
-                })
+                    vald_d_recorded.append({
+                        "sample_id": sample.sample_id,
+                        "metrics": {k: safe_convert_tensor(v) for k, v in metrics.items()},
+                        "pred_embeds": {k: t.tolist() for k, t in pred_embeds_per_fam.items()},
+                        "pred_logits": {k: t.tolist() for k, t in pred_edge_logits_per_fam.items()},
+                        "order": [f.model_id for f in inst_trainer.families]
+                    })
 
             with open(stage1_output_graph_path / f"{a_id}_{abl}_all_{mmd_str}_s1-graph-preds.json", "w") as f:
                 json.dump(vald_d_recorded, f)
@@ -270,7 +270,7 @@ def do_stage1():
         # EOL
 
 
-def gather_stage1() -> dict[int, list["InProgressInstance"]]:
+def gather_stage1(ip=True) -> dict[int, list["InProgressInstance"]]:
     ls: dict[int, list["InProgressInstance"]] = {0: [], 1: []}
     for a_id, abl in enumerate(model_ablations):
         for mmd_val in [0.0, 1.0]:
@@ -288,15 +288,21 @@ def gather_stage1() -> dict[int, list["InProgressInstance"]]:
 
             for fam in inst.families:
                 safename = fam.model_id.replace("/", "__")
-                fam.load_state_dict(torch.load(save_path / abl / "stage1_backup_fams" / f"TokFam_inprogress_{safename}_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
-
+                if ip:
+                    fam.load_state_dict(torch.load(save_path / abl / "stage1_backup_fams" / f"TokFam_inprogress_{safename}_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
+                else:
+                    fam.load_state_dict(torch.load(
+                        save_path / abl  / f"TokFam_{safename}_{mmd_str}_weights.pt",
+                        map_location="cpu", weights_only=True))
             ls[int(mmd_val)].append(inst)
             print("\t>> Complete!")
     return ls
 
 
-in_progress = gather_stage1()
-#do_stage1()
+in_progress = gather_stage1(ip=True)
+#in_progress = do_stage1()
+
+
 
 
 # # Stage 2 (careful memory management is painful to work with...)
