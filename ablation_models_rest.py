@@ -15,6 +15,9 @@ from typing import Union, Any
 from pathlib import Path
 import json, base64, array
 from collections import defaultdict
+from CudaDevice import CudaDevice
+from InProgressInstance import InProgressInstance, gather_instances
+from sample_tensors import safe_convert_tensor
 
 # Unfortunately, the current implementation precludes saving modified versions of the various modules (config is static)
 
@@ -22,8 +25,6 @@ flush_gpu()
 gc.collect()
 
 epochs = 40
-
-
 
 # rounded to 4dp where appropriate
 best_params = {
@@ -86,102 +87,10 @@ prompt_samples: list[CLadderSample] = CLadderDataset(org_ds).stratified_sample(5
 
 import numpy as np
 import pandas as pd
-from ablations.adgn_encoder import ADGNEncoder
-from ablations.gat_encoder import GATEncoder
-from ablations.gcn_encoder import GCNEncoder
 
-
-
-
-class InProgressInstance:
-    def __init__(self, core: CADGNCore, families: list[TokenizerFamily], ablation: str):
-        self.core: CADGNCore = core
-        self.families: list[TokenizerFamily] = families
-        self.ablation = ablation
-
-    def get_families_for_model(self, model_id) -> list[TokenizerFamily]:
-        return [f for f in self.families if f.model_id == model_id]
-
-    def cuda_stage1(self, device: str = "cuda"):
-        return CudaDevice(self.core, *self.families, device=device)
-
-    def cuda_stage2(self, family: TokenizerFamily, device: str = "cuda"):
-        return CudaDevice(self.core, family, device=device)
-
-    @classmethod
-    def create(cls, arch: ArchParams, abl: str, llm_models):
-        families = [
-            TokenizerFamily.from_pretrained(
-                model_id=model_id,
-                max_seq_len=128,
-                device="cpu",
-                **arch.family_kwargs()
-            )
-            for model_id in llm_models
-        ]
-
-        core = CADGNCore(**arch.core_kwargs())
-        if abl == "adgn":
-            core.encoder = ADGNEncoder(
-                hidden_dim=arch.ca_dgn_dim,
-                max_layers=arch.max_layers,
-                dropout=arch.encoder_dropout,
-                num_iters=arch.num_iters,
-                epsilon=arch.epsilon,
-                base_gamma=arch.base_gamma,
-            )
-        elif abl == "gat":
-            core.encoder = GATEncoder(
-                hidden_dim=arch.ca_dgn_dim,
-                max_layers=arch.max_layers,
-                dropout=arch.encoder_dropout,
-                num_heads=4
-            )
-
-        elif abl == "gcn":
-            core.encoder = GCNEncoder(
-                hidden_dim=arch.ca_dgn_dim,
-                max_layers=arch.max_layers,
-                dropout=arch.encoder_dropout,
-            )
-
-        elif abl == "dec":
-            core.decoder = nn.Identity()
-
-        return cls(core, families, abl)
-
-
-class CudaDevice:
-    """
-    Context manager that moves nn.Module(s) to a target device on entry, and restores them to their original device on exit.
-    """
-    def __init__(self, *modules: nn.Module, device: Union[str, torch.device] = "cuda"):
-        self.modules = list(modules)
-        self.device = device
-        self._original_devices: list[torch.device] = []
-
-    def __enter__(self) -> "CudaDevice":
-        for module in self.modules:
-            self._original_devices.append(get_device_of(module))
-            module.to(self.device)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        for module, original in zip(self.modules, self._original_devices):
-            module.to(original)
-        return False
 
 # Run Stage 1 first across all ablations, then run Stage 2 individually across all TokenizerFams for the same LLM
 
-
-def safe_convert_tensor(tensor: torch.Tensor) -> Any:
-    if isinstance(tensor, torch.Tensor):
-        if tensor.numel() == 1:
-            return tensor.item()
-        else:
-            return tensor.tolist()
-    else:
-        return tensor
 
 
 in_progress: dict[int, list["InProgressInstance"]] = {0: [], 1: []}
@@ -270,36 +179,14 @@ def do_stage1():
         # EOL
 
 
-def gather_stage1(ip=True) -> dict[int, list["InProgressInstance"]]:
-    ls: dict[int, list["InProgressInstance"]] = {0: [], 1: []}
-    for a_id, abl in enumerate(model_ablations):
-        for mmd_val in [0.0, 1.0]:
-            print(f"Reloading from checkpoint for Stage 1 (ablation={abl}({a_id}), MMD Weight={mmd_val})")
-            s1c.w_mmd = mmd_val
-            mmd_str = f"mmd-{int(mmd_val)}"
-            inst = InProgressInstance.create(
-                arch=arch,
-                abl=abl,
-                llm_models=do_models
-            )
-
-            # Load core parameters from disk
-            inst.core.load_state_dict(torch.load(save_path / abl / f"CADGNCore_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
-
-            for fam in inst.families:
-                safename = fam.model_id.replace("/", "__")
-                if ip:
-                    fam.load_state_dict(torch.load(save_path / abl / "stage1_backup_fams" / f"TokFam_inprogress_{safename}_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
-                else:
-                    fam.load_state_dict(torch.load(
-                        save_path / abl  / f"TokFam_{safename}_{mmd_str}_weights.pt",
-                        map_location="cpu", weights_only=True))
-            ls[int(mmd_val)].append(inst)
-            print("\t>> Complete!")
-    return ls
-
-
-in_progress = gather_stage1(ip=True)
+in_progress = gather_instances(
+    s1config=s1c,
+    arch_params=arch,
+    ablations=model_ablations,
+    llm_models=do_models,
+    save_path=save_path,
+    ip=True
+)
 #in_progress = do_stage1()
 
 

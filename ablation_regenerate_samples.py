@@ -7,7 +7,7 @@ from CADGNTrainer import CADGNTrainer, Stage1Config, Stage2Config
 
 from models_config import models
 from ds.cladder import CLadderSample, CLadderDataset, load_cladder_v1_5, CLadderLoaderConfig
-from cadgn import CADGNCore, TokenizerFamily, flush_gpu, save_history, BaseEncoder, LLMWrapper, eval_and_save, get_device_of, save_sample_results
+from cadgn import flush_gpu
 from search import ArchParams
 import gc
 
@@ -15,6 +15,9 @@ from typing import Union, Any
 from pathlib import Path
 import json
 from collections import defaultdict
+from sample_tensors import b64_to_tensor, compact_tensor_to_b64, safe_convert_tensor
+from InProgressInstance import InProgressInstance, gather_instances
+from models_config import get_stage_configs, arch
 
 # Unfortunately, the current implementation precludes saving modified versions of the various modules (config is static)
 
@@ -22,51 +25,7 @@ flush_gpu()
 gc.collect()
 
 epochs = 40
-
-
-
-# rounded to 4dp where appropriate
-best_params = {
-    "ca_dgn_dim": 256,
-    "max_layers": 5,
-    "num_iters": 4,
-    "epsilon": 0.0665, # 0.06646303815100524
-    "base_gamma": 0.0296, # 0.02956587470709161
-    "encoder_dropout": 0.0563,  # 0.05627028512612424
-    "decoder_expansion": 4,
-    "decoder_dropout": 0.1743,  # 0.17434218753510897
-    "head_encoder_dropout": 0.0595,  # 0.05948165802005359
-    "head_decoder_dropout": 0.0543,  # 0.0543472754267514
-}
-
-arch = ArchParams.from_dict(best_params)
-
-s1c = Stage1Config(
-    lr=0.0015,  # 0.0015121612751471838
-    weight_decay=0.0004,  # 0.0004379467905083944
-    grad_accum_steps=13,
-    # Default
-    max_steps_per_epoch=550,
-    max_steps_per_epoch_val=150,
-    w_mmd=1.0,
-    epochs=epochs
-)
-
-s2c = Stage2Config(
-    lr=0.0015,  # 0.0015121612751471838
-    weight_decay=0.0004,  # 0.0004379467905083944
-    grad_accum_steps=13,
-    max_steps_per_epoch=550,
-    max_steps_per_epoch_val=150,
-    w_mmd = 1.0,
-    epochs=epochs
-)
-
-evals2c = Stage2Config(
-  **s2c.__dict__
-)
-evals2c.max_steps_per_epoch_val = None
-evals2c.max_steps_per_epoch = None
+s1c, s2c, evals2c = get_stage_configs(epochs)
 
 dsConfig = CLadderLoaderConfig(rung_filter=None, query_types=None, skip_unparseable=True)
 
@@ -85,105 +44,9 @@ complete_val = vald.as_dataloader(shuffle=False)
 
 import numpy as np
 import pandas as pd
-from ablations.adgn_encoder import ADGNEncoder
-from ablations.gat_encoder import GATEncoder
-from ablations.gcn_encoder import GCNEncoder
-
-
-
-
-class InProgressInstance:
-    def __init__(self, core: CADGNCore, families: list[TokenizerFamily], ablation: str):
-        self.core: CADGNCore = core
-        self.families: list[TokenizerFamily] = families
-        self.ablation = ablation
-
-    def get_families_for_model(self, model_id) -> list[TokenizerFamily]:
-        return [f for f in self.families if f.model_id == model_id]
-
-    def cuda_stage1(self, device: str = "cuda"):
-        return CudaDevice(self.core, *self.families, device=device)
-
-    def cuda_stage2(self, family: TokenizerFamily, device: str = "cuda"):
-        return CudaDevice(self.core, family, device=device)
-
-    @classmethod
-    def create(cls, arch: ArchParams, abl: str, llm_models):
-        families = [
-            TokenizerFamily.from_pretrained(
-                model_id=model_id,
-                max_seq_len=128,
-                device="cpu",
-                **arch.family_kwargs()
-            )
-            for model_id in llm_models
-        ]
-
-        core = CADGNCore(**arch.core_kwargs())
-        if abl == "adgn":
-            core.encoder = ADGNEncoder(
-                hidden_dim=arch.ca_dgn_dim,
-                max_layers=arch.max_layers,
-                dropout=arch.encoder_dropout,
-                num_iters=arch.num_iters,
-                epsilon=arch.epsilon,
-                base_gamma=arch.base_gamma,
-            )
-        elif abl == "gat":
-            core.encoder = GATEncoder(
-                hidden_dim=arch.ca_dgn_dim,
-                max_layers=arch.max_layers,
-                dropout=arch.encoder_dropout,
-                num_heads=4
-            )
-
-        elif abl == "gcn":
-            core.encoder = GCNEncoder(
-                hidden_dim=arch.ca_dgn_dim,
-                max_layers=arch.max_layers,
-                dropout=arch.encoder_dropout,
-            )
-
-        elif abl == "dec":
-            core.decoder = nn.Identity()
-
-        return cls(core, families, abl)
-
-
-class CudaDevice:
-    """
-    Context manager that moves nn.Module(s) to a target device on entry, and restores them to their original device on exit.
-    """
-    def __init__(self, *modules: nn.Module, device: Union[str, torch.device] = "cuda"):
-        self.modules = list(modules)
-        self.device = device
-        self._original_devices: list[torch.device] = []
-
-    def __enter__(self) -> "CudaDevice":
-        for module in self.modules:
-            self._original_devices.append(get_device_of(module))
-            module.to(self.device)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        for module, original in zip(self.modules, self._original_devices):
-            module.to(original)
-        return False
 
 # Run Stage 1 first across all ablations, then run Stage 2 individually across all TokenizerFams for the same LLM
 
-
-def safe_convert_tensor(tensor: torch.Tensor) -> Any:
-    if isinstance(tensor, torch.Tensor):
-        if tensor.numel() == 1:
-            return tensor.item()
-        else:
-            return tensor.tolist()
-    else:
-        return tensor
-
-
-in_progress: dict[int, list["InProgressInstance"]] = {0: [], 1: []}
 # # STAGE 1
 stage1_output_graph_path = Path("./ablate_results/samples/stage1/")
 stage1_output_graph_path.mkdir(parents=True, exist_ok=True)
@@ -191,39 +54,75 @@ save_path = Path("./saves/ablations/")
 save_path.mkdir(parents=True, exist_ok=True)
 
 do_models = [
-    #"Qwen/Qwen3-4B",
-    #"meta-llama/Llama-3.2-3B-Instruct",
-    #"Qwen/Qwen3-8B",
+    "Qwen/Qwen3-4B",
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "Qwen/Qwen3-8B",
     "meta-llama/Llama-3.1-8B-Instruct"
 ]
 model_ablations = ["cadgn", "adgn", "gcn", "gat", "dec"]
 
+import time
+## Stage 1 regenerate samples
+in_progress = gather_instances(
+    s1config=s1c,
+    arch_params=arch,
+    ablations=model_ablations,
+    llm_models=do_models,
+    save_path=save_path,
+    ip=True
+)
+print("Regenerating Samples...")
+for mmd_int, insts in in_progress.items():
+    for i, inst in enumerate(insts):
+        a_id = model_ablations.index(inst.ablation)
+        print(f"\t{inst.ablation}({a_id}) @ MMD {mmd_int}")
+        t0 = time.perf_counter()
+        inst_trainer = CADGNTrainer(
+            inst.core,
+            inst.families,
+            profile=True
+        )
+        s1c.w_mmd = float(mmd_int)
 
-def gather_stage2() -> dict[int, list["InProgressInstance"]]:
-    ls: dict[int, list["InProgressInstance"]] = {0: [], 1: []}
-    for a_id, abl in enumerate(model_ablations):
-        for mmd_val in [0.0, 1.0]:
-            print(f"Reloading from checkpoint for Stage 1 (ablation={abl}({a_id}), MMD Weight={mmd_val})")
-            s1c.w_mmd = mmd_val
-            mmd_str = f"mmd-{int(mmd_val)}"
-            inst = InProgressInstance.create(
-                arch=arch,
-                abl=abl,
-                llm_models=do_models
-            )
-
-            # Load core parameters from disk
-            inst.core.load_state_dict(torch.load(save_path / abl / f"CADGNCore_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
-
+        vald_d_recorded = []
+        with inst.cuda_stage1() as ctx:
+            # Configure properly.
+            inst.core.eval()
+            inst.core.configure_eval()
             for fam in inst.families:
-                safename = fam.model_id.replace("/", "__")
-                fam.load_state_dict(torch.load(save_path / abl / f"TokFam_{safename}_{mmd_str}_weights.pt", map_location="cpu", weights_only=True))
+                fam.eval()
+                fam.configure_eval()
 
-            ls[int(mmd_val)].append(inst)
-            print("\t>> Complete!")
-    return ls
+            for step_idx, sample in enumerate(complete_val):
+                metrics, pred_embeds_per_fam, pred_edge_logits_per_fam = inst_trainer._stage1_step(
+                    sample=sample,
+                    config=s1c,
+                )
+                vald_d_recorded.append({
+                    "sample_id": sample.sample_id,
+                    "graph_id": sample.graph_id,
+                    "metrics": {k: safe_convert_tensor(v) for k, v in metrics.items()},
+                    "pred_embeds": {k: compact_tensor_to_b64(t) for k, t in pred_embeds_per_fam.items()},
+                    "pred_logits": {k: compact_tensor_to_b64(t) for k, t in pred_edge_logits_per_fam.items()},
+                    "order": [f.model_id for f in inst_trainer.families]
+                })
 
-abl_models = gather_stage2()
+        with open(stage1_output_graph_path / f"{a_id}_{inst.ablation}_all_{mmd_int}_s1-graph-preds.json", "w") as f:
+            json.dump(vald_d_recorded, f)
+        t1 = time.perf_counter()
+        dt = t1 - t0
+        print(f"\t\t>> Completed in {dt:.3f}s")
+
+
+"""
+abl_models = gather_stage1(
+    s1config=s1c,
+    arch_params=arch,
+    ablations=model_ablations,
+    llm_models=do_models,
+    save_path=save_path,
+    ip=False
+)
 
 stage2_output_graph_path = Path("./ablate_results/samples/stage2/")
 stage2_output_graph_path.mkdir(parents=True, exist_ok=True)
@@ -279,3 +178,5 @@ for mdl in do_models:
                 del metrics, per_sample, dict_pred_embeds, yes_ids, no_ids
                 gc.collect()
                 flush_gpu()
+"""
+
