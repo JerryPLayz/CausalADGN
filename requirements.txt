@@ -47,3 +47,8 @@ ray[tune]>=2.0.0
 
 # Manim (for animations)
 manim
+
+# Analysis
+pyarrow
+polars
+umap-learn
