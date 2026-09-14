@@ -239,14 +239,10 @@ class AnalysisReport:
 
 def load_variant_results(
         files: dict[tuple[str, str, int], Union[str, Path]],
-        epoch: int,
-        variant_names: list[str],
 ) -> list[VariantResults]:
     """
     Load per-sample evaluation results for a set of ablation variants.
     :param files: dict with key (ablation, modelid, mmd_int), and value of the path to the instance with that configuration.
-    :param epoch:
-    :param variant_names:
     :return:
     """
     loaded = []
